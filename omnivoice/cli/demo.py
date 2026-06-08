@@ -25,6 +25,7 @@ Usage:
 
 import argparse
 import logging
+from pathlib import Path
 from typing import Any, Dict
 
 import gradio as gr
@@ -156,6 +157,23 @@ def build_demo(
 ) -> gr.Blocks:
 
     sampling_rate = model.sampling_rate
+
+    def _load_reference_text_file(file_obj: Any) -> str:
+        if file_obj is None:
+            return ""
+
+        file_path = getattr(file_obj, "name", file_obj)
+        if not isinstance(file_path, str):
+            raise gr.Error("Unsupported reference text file input.")
+
+        path = Path(file_path)
+        if path.suffix.lower() != ".txt":
+            raise gr.Error("Reference text file must be a .txt file.")
+
+        try:
+            return path.read_text(encoding="utf-8").strip()
+        except UnicodeDecodeError as exc:
+            raise gr.Error("Reference text file must be UTF-8 encoded.") from exc
 
     # -- shared generation core --
     def _gen_core(
@@ -338,6 +356,11 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                             placeholder="Transcript of the reference audio. Leave empty"
                             " to auto-transcribe via ASR models.",
                         )
+                        vc_ref_text_file = gr.File(
+                            label="Reference Text File (.txt)",
+                            file_types=[".txt"],
+                            type="filepath",
+                        )
                         vc_lang = _lang_dropdown("Language (optional) / 语种 (可选)")
                         with gr.Accordion("Instruct (optional)", open=False):
                             vc_instruct = gr.Textbox(label="Instruct", lines=2)
@@ -376,6 +399,12 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                         mode="clone",
                         ref_text=ref_text or None,
                     )
+
+                vc_ref_text_file.change(
+                    _load_reference_text_file,
+                    inputs=vc_ref_text_file,
+                    outputs=vc_ref_text,
+                )
 
                 vc_btn.click(
                     _clone_fn,
