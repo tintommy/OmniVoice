@@ -40,6 +40,7 @@ Rules:
   - Reference Text
 - Speaker Name must be unique across enabled Voice Profiles.
 - Reference Text is required.
+- Reference Text may be entered manually or loaded from an uploaded `.txt` file.
 - Do not auto-transcribe Reference Text in Phase 1.
 - Show helper text for Reference Voice:
 
@@ -110,7 +111,7 @@ Add one shared pause setting for the full conversation:
 
 ## 8. Validation
 
-Add a dedicated **Validate** button. The **Generate** button must also run validation again before invoking the model.
+Add a dedicated **Validate** button. Users must click **Validate** before **Generate** for every generation run. If inputs change after validation, Generate must fail and ask the user to validate again. After a successful Generate, validation state is cleared so the next Generate requires a fresh Validate click.
 
 ### Voice Profile validation
 
@@ -144,7 +145,7 @@ After successful validation, show a summary:
 - Pause duration
 - Output format: WAV
 
-Generate should validate again and update this summary.
+Generate should require a current successful validation state and update this summary only from that validated state.
 
 ## 9. Generate Behavior
 

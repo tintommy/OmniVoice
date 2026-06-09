@@ -24,6 +24,7 @@ Usage:
 """
 
 import argparse
+import json
 import logging
 import tempfile
 from datetime import datetime
@@ -230,6 +231,16 @@ def build_demo(
             )
         return profiles
 
+    def _conversation_validation_fingerprint(result: dict[str, Any]) -> str:
+        payload = {
+            "voice_profiles": result["voice_profiles"],
+            "dialogue_lines": result["dialogue_lines"],
+            "language": result["language"],
+            "speed": result["speed"],
+            "pause_ms": result["pause_ms"],
+        }
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
     def _validate_conversation_adapter(
         language: str,
         speed: float,
@@ -249,6 +260,7 @@ def build_demo(
             )
         except ConversationVoiceCloneError as exc:
             raise gr.Error(str(exc)) from exc
+        result["validation_fingerprint"] = _conversation_validation_fingerprint(result)
         summary = (
             f"Enabled Voice Profiles: {result['enabled_voice_profiles_count']}\n"
             f"Dialogue Lines: {result['dialogue_lines_count']}\n"
@@ -259,6 +271,7 @@ def build_demo(
         return result, summary, "Validation passed."
 
     def _generate_conversation_adapter(
+        validation_state: dict[str, Any] | None,
         language: str,
         speed: float,
         pause_ms: float,
@@ -266,17 +279,23 @@ def build_demo(
         *slot_values: Any,
         progress=gr.Progress(),
     ):
-        result, summary, _ = _validate_conversation_adapter(
+        if validation_state is None:
+            raise gr.Error("Please click Validate before Generate.")
+        current_result, summary, _ = _validate_conversation_adapter(
             language,
             speed,
             pause_ms,
             dialogue_rows,
             *slot_values,
         )
+        if validation_state.get("validation_fingerprint") != current_result.get(
+            "validation_fingerprint"
+        ):
+            raise gr.Error("Inputs changed. Please click Validate again before Generate.")
         try:
             metadata = generate_conversation_voice_clone(
                 model=model,
-                validation_result=result,
+                validation_result=validation_state,
                 progress=progress,
             )
         except ConversationVoiceCloneError as exc:
@@ -287,9 +306,9 @@ def build_demo(
             f"Output filename: {metadata['output_filename']}"
         )
         return (
-            result,
+            None,
             summary,
-            metadata.get("status", "Done."),
+            metadata.get("status", "Done. Please click Validate again before generating another conversation."),
             metadata.get("audio_path"),
             metadata.get("download_path"),
             metadata_text,
@@ -617,7 +636,17 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                                 cvc_ref_text = gr.Textbox(
                                     label="Reference Text",
                                     lines=2,
-                                    placeholder="Enter the transcript for the reference voice.",
+                                    placeholder="Enter the transcript for the reference voice, or upload a .txt file below.",
+                                )
+                                cvc_ref_text_file = gr.File(
+                                    label="Reference Text File (.txt)",
+                                    file_types=[".txt"],
+                                    type="filepath",
+                                )
+                                cvc_ref_text_file.change(
+                                    _load_reference_text_file,
+                                    inputs=cvc_ref_text_file,
+                                    outputs=cvc_ref_text,
                                 )
                                 cvc_slot_inputs.extend(
                                     [
@@ -706,7 +735,7 @@ by Xiaomi AI Lab Next-gen Kaldi team.
 
                 cvc_generate_btn.click(
                     _generate_conversation_adapter,
-                    inputs=cvc_validate_inputs,
+                    inputs=[conversation_validation_state, *cvc_validate_inputs],
                     outputs=[
                         conversation_validation_state,
                         cvc_summary,
