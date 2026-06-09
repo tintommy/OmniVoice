@@ -48,6 +48,20 @@ from omnivoice.cli.conversation_voice_clone import (
     validate_conversation_voice_clone,
 )
 
+from omnivoice.cli.voice_clone_queue import (
+    QueuedCloneItem,
+    VoiceCloneQueueError,
+    VoiceCloneQueueRequest,
+    export_queue_csv,
+    export_sample_queue_csv,
+    generate_voice_clone_queue,
+    import_queue_csv,
+    normalize_queue_rows,
+    validate_queue_request,
+)
+
+QUEUE_AVAILABLE = True
+
 
 # ---------------------------------------------------------------------------
 # Language list — all 600+ supported languages
@@ -360,6 +374,218 @@ def build_demo(
         output_path.write_text("speaker_name,text\n", encoding="utf-8-sig")
         return str(output_path), "Sample Dialogue CSV exported."
 
+    def _empty_queue_rows() -> list[list[str]]:
+        return [[""] for _ in range(5)]
+
+    def _normalize_queue_rows(rows: Any) -> list[dict[str, str]]:
+        return normalize_queue_rows(rows)
+
+    def _queue_validation_fingerprint(result: dict[str, Any]) -> str:
+        payload = {
+            "queue_items": result["queue_items"],
+            "reference_audio": result["reference_audio"],
+            "reference_text": result.get("reference_text"),
+            "language": result["language"],
+            "instruct": result.get("instruct"),
+            "generation_config": result["generation_config"],
+            "speed": result.get("speed"),
+            "duration": result.get("duration"),
+        }
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+    def _validate_queue_adapter(
+        ref_audio: str | None,
+        ref_text: str,
+        language: str,
+        instruct: str,
+        num_step: float,
+        guidance_scale: float,
+        denoise: bool,
+        speed: float | None,
+        duration: float | None,
+        preprocess_prompt: bool,
+        postprocess_output: bool,
+        queue_rows: Any,
+    ):
+        queue_items = [QueuedCloneItem(text=row["text"]) for row in _normalize_queue_rows(queue_rows)]
+        generation_config = OmniVoiceGenerationConfig(
+            num_step=int(num_step or 32),
+            guidance_scale=float(guidance_scale) if guidance_scale is not None else 2.0,
+            denoise=bool(denoise) if denoise is not None else True,
+            preprocess_prompt=bool(preprocess_prompt),
+            postprocess_output=bool(postprocess_output),
+        )
+        lang = language if (language and language != "Auto") else None
+        duration_value = None if duration is None or float(duration) <= 0 else float(duration)
+        speed_value = None if speed is None else float(speed)
+        request = VoiceCloneQueueRequest(
+            items=queue_items,
+            ref_audio=ref_audio,
+            ref_text=(ref_text or None),
+            language=lang,
+            instruct=(instruct or None),
+            speed=1.0 if speed_value is None else speed_value,
+            duration=duration_value,
+        )
+        try:
+            summary_obj = validate_queue_request(request)
+        except VoiceCloneQueueError as exc:
+            raise gr.Error(str(exc)) from exc
+        result = {
+            "queue_items": [{"text": item.text} for item in queue_items],
+            "queue_items_count": summary_obj.queue_items,
+            "total_characters": summary_obj.total_characters,
+            "output_format": summary_obj.output_format,
+            "download_all_format": summary_obj.download_all_format,
+        }
+        result["generation_config"] = {
+            "num_step": int(num_step or 32),
+            "guidance_scale": float(guidance_scale) if guidance_scale is not None else 2.0,
+            "denoise": bool(denoise) if denoise is not None else True,
+            "preprocess_prompt": bool(preprocess_prompt),
+            "postprocess_output": bool(postprocess_output),
+        }
+        result["reference_audio"] = ref_audio
+        result["reference_text"] = ref_text or None
+        result["language"] = lang
+        result["instruct"] = instruct or None
+        result["speed"] = None if speed is None else float(speed)
+        result["duration"] = None if duration is None or float(duration) <= 0 else float(duration)
+        result["validation_fingerprint"] = _queue_validation_fingerprint(result)
+        summary = (
+            f"Queue items: {result['queue_items_count']}\n"
+            f"Total characters: {result['total_characters']} / 20000\n"
+            f"Output format: {result.get('output_format', 'WAV')}\n"
+            f"Download all format: {result.get('download_all_format', 'ZIP')}"
+        )
+        return result, summary, "Validation passed."
+
+    def _generate_queue_adapter(
+        validation_state: dict[str, Any] | None,
+        ref_audio: str | None,
+        ref_text: str,
+        language: str,
+        instruct: str,
+        num_step: float,
+        guidance_scale: float,
+        denoise: bool,
+        speed: float | None,
+        duration: float | None,
+        preprocess_prompt: bool,
+        postprocess_output: bool,
+        queue_rows: Any,
+        progress=gr.Progress(),
+    ):
+        if validation_state is None:
+            raise gr.Error("Please click Validate Queue before Generate Queue.")
+        current_result, summary, _ = _validate_queue_adapter(
+            ref_audio,
+            ref_text,
+            language,
+            instruct,
+            num_step,
+            guidance_scale,
+            denoise,
+            speed,
+            duration,
+            preprocess_prompt,
+            postprocess_output,
+            queue_rows,
+        )
+        if validation_state.get("validation_fingerprint") != current_result.get(
+            "validation_fingerprint"
+        ):
+            raise gr.Error(
+                "Queue inputs changed. Please click Validate Queue again before Generate Queue."
+            )
+        generation_config = OmniVoiceGenerationConfig(
+            num_step=validation_state["generation_config"]["num_step"],
+            guidance_scale=validation_state["generation_config"]["guidance_scale"],
+            denoise=validation_state["generation_config"]["denoise"],
+            preprocess_prompt=validation_state["generation_config"]["preprocess_prompt"],
+            postprocess_output=validation_state["generation_config"]["postprocess_output"],
+        )
+        try:
+            request = VoiceCloneQueueRequest(
+                items=[
+                    QueuedCloneItem(text=item["text"])
+                    for item in validation_state["queue_items"]
+                ],
+                ref_audio=validation_state["reference_audio"],
+                ref_text=validation_state.get("reference_text"),
+                language=validation_state.get("language"),
+                instruct=validation_state.get("instruct"),
+                speed=1.0 if validation_state.get("speed") is None else float(validation_state["speed"]),
+                duration=validation_state.get("duration"),
+            )
+            result = generate_voice_clone_queue(
+                model=model,
+                request=request,
+                generation_config=generation_config,
+                progress=progress,
+            )
+            metadata = {
+                "wav_paths": result.wav_paths,
+                "zip_path": result.zip_path,
+                "queue_items_generated": result.metadata["queue_items"],
+                "total_characters": result.metadata["total_characters"],
+                "zip_filename": Path(result.zip_path).name,
+                "status": "Done. Please click Validate Queue again before generating another queue.",
+            }
+        except VoiceCloneQueueError as exc:
+            raise gr.Error(str(exc)) from exc
+        metadata_text = (
+            f"Queue items generated: {metadata['queue_items_generated']}\n"
+            f"Total text characters: {metadata['total_characters']}\n"
+            f"ZIP filename: {metadata['zip_filename']}"
+        )
+        return (
+            None,
+            summary,
+            metadata.get(
+                "status",
+                "Done. Please click Validate Queue again before generating another queue.",
+            ),
+            metadata.get("wav_paths") or metadata.get("audio_paths"),
+            metadata.get("zip_path") or metadata.get("download_path"),
+            metadata_text,
+        )
+
+    def _import_queue_csv(file_obj: Any):
+        if file_obj is None:
+            return _empty_queue_rows(), "", ""
+        file_path = getattr(file_obj, "name", file_obj)
+        if not isinstance(file_path, str):
+            raise gr.Error("Unsupported CSV input.")
+        path = Path(file_path)
+        if path.suffix.lower() != ".csv":
+            raise gr.Error("Queue CSV must be a .csv file.")
+
+        try:
+            imported_items = import_queue_csv(path.read_text(encoding="utf-8-sig"))
+        except VoiceCloneQueueError as exc:
+            raise gr.Error(str(exc)) from exc
+
+        rows = [[item.text] for item in imported_items]
+        return rows or _empty_queue_rows(), "", "Queue CSV loaded."
+
+    def _export_queue_csv(queue_rows: Any):
+        rows = _normalize_queue_rows(queue_rows)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = Path(tempfile.gettempdir()) / f"voice_clone_queue_{timestamp}.csv"
+        queue_items = [QueuedCloneItem(text=row["text"]) for row in rows]
+        output_path.write_text(
+            export_queue_csv(queue_items),
+            encoding="utf-8-sig",
+        )
+        return str(output_path), "Queue CSV exported."
+
+    def _export_sample_queue_csv():
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = Path(tempfile.gettempdir()) / f"voice_clone_queue_sample_{timestamp}.csv"
+        output_path.write_text(export_sample_queue_csv(), encoding="utf-8-sig")
+        return str(output_path), "Sample Queue CSV exported."
+
     # -- shared generation core --
     def _gen_core(
         text,
@@ -609,6 +835,115 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                     ],
                     outputs=[vc_audio, vc_status],
                 )
+
+                # ==============================================================
+                # Queue Generation Section
+                # ==============================================================
+                if QUEUE_AVAILABLE:
+                    with gr.Accordion("Queue Generation", open=False):
+                        queue_validation_state = gr.State(value=None)
+                        
+                        gr.Markdown("### Queue Settings")
+                        gr.Markdown(
+                            "Queue Generation uses the same Reference Audio/Text and settings from above. "
+                            "Each text item in the queue will be generated with those shared settings."
+                        )
+                        
+                        with gr.Row():
+                            queue_csv_import = gr.File(
+                                label="Import Queue CSV",
+                                file_types=[".csv"],
+                                type="filepath",
+                            )
+                            queue_sample_btn = gr.Button("Export Sample CSV")
+                            queue_sample_file = gr.File(label="Sample CSV")
+                            queue_export_btn = gr.Button("Export Queue CSV")
+                            queue_export_file = gr.File(label="Queue CSV")
+                        
+                        gr.Markdown("### Queue Items")
+                        gr.Markdown(
+                            "Add text items to generate. Each row will produce one WAV file. Maximum 20 items, 3000 chars per item, 20000 total chars."
+                        )
+                        queue_df = gr.Dataframe(
+                            headers=["text"],
+                            datatype=["str"],
+                            value=_empty_queue_rows(),
+                            row_count=(5, "dynamic"),
+                            col_count=(1, "fixed"),
+                            label="Queue Items",
+                        )
+                        
+                        with gr.Row():
+                            queue_validate_btn = gr.Button("Validate Queue")
+                            queue_generate_btn = gr.Button("Generate Queue", variant="primary")
+                        
+                        queue_summary = gr.Textbox(label="Queue Summary", lines=4)
+                        queue_status = gr.Textbox(label="Queue Status", lines=2)
+                        queue_wav_files = gr.File(
+                            label="Generated Queue WAV Files",
+                            file_count="multiple",
+                        )
+                        queue_zip_file = gr.File(label="Download All Queue WAVs (ZIP)")
+                        queue_metadata = gr.Textbox(label="Queue Metadata", lines=3)
+
+                        queue_csv_import.change(
+                            _import_queue_csv,
+                            inputs=queue_csv_import,
+                            outputs=[queue_df, queue_summary, queue_status],
+                        )
+                        queue_export_btn.click(
+                            _export_queue_csv,
+                            inputs=queue_df,
+                            outputs=[queue_export_file, queue_status],
+                        )
+                        queue_sample_btn.click(
+                            _export_sample_queue_csv,
+                            outputs=[queue_sample_file, queue_status],
+                        )
+                        queue_validate_btn.click(
+                            _validate_queue_adapter,
+                            inputs=[
+                                vc_ref_audio,
+                                vc_ref_text,
+                                vc_lang,
+                                vc_instruct,
+                                vc_ns,
+                                vc_gs,
+                                vc_dn,
+                                vc_sp,
+                                vc_du,
+                                vc_pp,
+                                vc_po,
+                                queue_df,
+                            ],
+                            outputs=[queue_validation_state, queue_summary, queue_status],
+                        )
+                        queue_generate_btn.click(
+                            _generate_queue_adapter,
+                            inputs=[
+                                queue_validation_state,
+                                vc_ref_audio,
+                                vc_ref_text,
+                                vc_lang,
+                                vc_instruct,
+                                vc_ns,
+                                vc_gs,
+                                vc_dn,
+                                vc_sp,
+                                vc_du,
+                                vc_pp,
+                                vc_po,
+                                queue_df,
+                            ],
+                            outputs=[
+                                queue_validation_state,
+                                queue_summary,
+                                queue_status,
+                                queue_wav_files,
+                                queue_zip_file,
+                                queue_metadata,
+                            ],
+                        )
 
             # ==============================================================
             # Conversation Voice Clone
