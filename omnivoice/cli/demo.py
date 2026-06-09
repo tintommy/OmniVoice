@@ -25,6 +25,8 @@ Usage:
 
 import argparse
 import logging
+import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict
 
@@ -35,6 +37,15 @@ import torch
 from omnivoice import OmniVoice, OmniVoiceGenerationConfig
 from omnivoice.utils.common import get_best_device
 from omnivoice.utils.lang_map import LANG_NAMES, lang_display_name
+
+from omnivoice.cli.conversation_voice_clone import (
+    ConversationVoiceCloneError,
+    DialogueLine,
+    export_dialogue_lines_csv,
+    generate_conversation_voice_clone,
+    import_dialogue_lines_csv,
+    validate_conversation_voice_clone,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +185,155 @@ def build_demo(
             return path.read_text(encoding="utf-8").strip()
         except UnicodeDecodeError as exc:
             raise gr.Error("Reference text file must be UTF-8 encoded.") from exc
+
+    def _conversation_language_choices() -> list[str]:
+        return [lang for lang in _ALL_LANGUAGES if lang != "Auto"]
+
+    def _empty_dialogue_rows() -> list[list[str]]:
+        return [["", ""] for _ in range(5)]
+
+    def _normalize_dialogue_rows(rows: Any) -> list[dict[str, str]]:
+        if rows is None:
+            return []
+        if hasattr(rows, "to_dict"):
+            try:
+                rows = rows.to_dict(orient="records")
+            except TypeError:
+                rows = rows.to_dict()
+        normalized = []
+        for row in rows or []:
+            if isinstance(row, dict):
+                speaker_name = str(row.get("speaker_name", "") or "").strip()
+                text = str(row.get("text", "") or "").strip()
+            else:
+                values = list(row) if isinstance(row, (list, tuple)) else [row]
+                speaker_name = str(values[0] if len(values) > 0 else "").strip()
+                text = str(values[1] if len(values) > 1 else "").strip()
+            if speaker_name or text:
+                normalized.append({"speaker_name": speaker_name, "text": text})
+        return normalized
+
+    def _collect_voice_profiles(*slot_values: Any) -> list[dict[str, Any]]:
+        profiles = []
+        for index in range(0, len(slot_values), 4):
+            slot_number = index // 4 + 1
+            enabled, speaker_name, ref_audio, ref_text = slot_values[index : index + 4]
+            file_path = getattr(ref_audio, "name", ref_audio) if ref_audio is not None else None
+            profiles.append(
+                {
+                    "slot_index": slot_number,
+                    "enabled": bool(enabled),
+                    "speaker_name": str(speaker_name or "").strip(),
+                    "ref_audio": file_path,
+                    "ref_text": str(ref_text or "").strip(),
+                }
+            )
+        return profiles
+
+    def _validate_conversation_adapter(
+        language: str,
+        speed: float,
+        pause_ms: float,
+        dialogue_rows: Any,
+        *slot_values: Any,
+    ):
+        voice_profiles = _collect_voice_profiles(*slot_values)
+        dialogue_lines = _normalize_dialogue_rows(dialogue_rows)
+        try:
+            result = validate_conversation_voice_clone(
+                voice_profiles=voice_profiles,
+                dialogue_lines=dialogue_lines,
+                language=language,
+                speed=float(speed),
+                pause_ms=int(pause_ms),
+            )
+        except ConversationVoiceCloneError as exc:
+            raise gr.Error(str(exc)) from exc
+        summary = (
+            f"Enabled Voice Profiles: {result['enabled_voice_profiles_count']}\n"
+            f"Dialogue Lines: {result['dialogue_lines_count']}\n"
+            f"Total characters: {result['total_characters']} / 20000\n"
+            f"Pause duration: {result['pause_ms']} ms\n"
+            f"Output format: {result.get('output_format', 'WAV')}"
+        )
+        return result, summary, "Validation passed."
+
+    def _generate_conversation_adapter(
+        language: str,
+        speed: float,
+        pause_ms: float,
+        dialogue_rows: Any,
+        *slot_values: Any,
+        progress=gr.Progress(),
+    ):
+        result, summary, _ = _validate_conversation_adapter(
+            language,
+            speed,
+            pause_ms,
+            dialogue_rows,
+            *slot_values,
+        )
+        try:
+            metadata = generate_conversation_voice_clone(
+                model=model,
+                validation_result=result,
+                progress=progress,
+            )
+        except ConversationVoiceCloneError as exc:
+            raise gr.Error(str(exc)) from exc
+        metadata_text = (
+            f"Dialogue Lines generated: {metadata['dialogue_lines_generated']}\n"
+            f"Total text characters: {metadata['total_characters']}\n"
+            f"Output filename: {metadata['output_filename']}"
+        )
+        return (
+            result,
+            summary,
+            metadata.get("status", "Done."),
+            metadata.get("audio_path"),
+            metadata.get("download_path"),
+            metadata_text,
+        )
+
+    def _reset_conversation_outputs():
+        return None, _empty_dialogue_rows(), "", "", None, None, ""
+
+    def _import_dialogue_csv(file_obj: Any):
+        if file_obj is None:
+            return _empty_dialogue_rows(), "", ""
+
+        file_path = getattr(file_obj, "name", file_obj)
+        if not isinstance(file_path, str):
+            raise gr.Error("Unsupported CSV input.")
+
+        path = Path(file_path)
+        if path.suffix.lower() != ".csv":
+            raise gr.Error("Dialogue CSV must be a .csv file.")
+
+        try:
+            imported_lines = import_dialogue_lines_csv(path.read_text(encoding="utf-8"))
+        except ConversationVoiceCloneError as exc:
+            raise gr.Error(str(exc)) from exc
+
+        rows = [[line.speaker_name, line.text] for line in imported_lines]
+        return rows or _empty_dialogue_rows(), "", "Dialogue CSV loaded."
+
+    def _export_dialogue_csv(dialogue_rows: Any):
+        rows = _normalize_dialogue_rows(dialogue_rows)
+        if not rows:
+            raise gr.Error("Add at least one Dialogue Line before export.")
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = Path(tempfile.gettempdir()) / f"conversation_voice_clone_dialogue_{timestamp}.csv"
+        dialogue_lines = [
+            DialogueLine(speaker_name=row["speaker_name"], text=row["text"])
+            for row in rows
+        ]
+        output_path.write_text(
+            export_dialogue_lines_csv(dialogue_lines),
+            encoding="utf-8",
+        )
+        return str(output_path), "Dialogue CSV exported."
 
     # -- shared generation core --
     def _gen_core(
@@ -423,6 +583,163 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                         vc_po,
                     ],
                     outputs=[vc_audio, vc_status],
+                )
+
+            # ==============================================================
+            # Conversation Voice Clone
+            # ==============================================================
+            with gr.TabItem("Conversation Voice Clone"):
+                conversation_validation_state = gr.State(value=None)
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        gr.Markdown("### Voice Profiles")
+                        cvc_slot_inputs = []
+                        for slot_idx in range(1, 6):
+                            with gr.Accordion(f"Voice Profile {slot_idx}", open=(slot_idx == 1)):
+                                cvc_enabled = gr.Checkbox(
+                                    label="Enable this speaker",
+                                    value=(slot_idx == 1),
+                                )
+                                cvc_speaker_name = gr.Textbox(
+                                    label="Speaker Name",
+                                    placeholder=f"Speaker {slot_idx}",
+                                )
+                                cvc_ref_audio = gr.Audio(
+                                    label="Reference Voice",
+                                    type="filepath",
+                                    elem_classes="compact-audio",
+                                )
+                                gr.Markdown(
+                                    "<span style='font-size:0.85em;color:#888;'>"
+                                    "Recommended reference audio: 3–10 seconds. Longer clips may slow inference or reduce cloning quality."
+                                    "</span>"
+                                )
+                                cvc_ref_text = gr.Textbox(
+                                    label="Reference Text",
+                                    lines=2,
+                                    placeholder="Enter the transcript for the reference voice.",
+                                )
+                                cvc_slot_inputs.extend(
+                                    [
+                                        cvc_enabled,
+                                        cvc_speaker_name,
+                                        cvc_ref_audio,
+                                        cvc_ref_text,
+                                    ]
+                                )
+
+                    with gr.Column(scale=1):
+                        gr.Markdown("### Dialogue Lines")
+                        cvc_dialogue_csv = gr.File(
+                            label="Import Dialogue CSV",
+                            file_types=[".csv"],
+                            type="filepath",
+                        )
+                        cvc_dialogue_df = gr.Dataframe(
+                            headers=["speaker_name", "text"],
+                            datatype=["str", "str"],
+                            row_count=(5, "dynamic"),
+                            col_count=(2, "fixed"),
+                            value=_empty_dialogue_rows(),
+                            interactive=True,
+                            wrap=True,
+                            label="Dialogue Lines",
+                            max_height=500,
+                        )
+                        with gr.Row():
+                            cvc_export_btn = gr.Button("Export Dialogue CSV")
+                            cvc_export_file = gr.File(label="Dialogue CSV Export")
+                        gr.Markdown("### Conversation Settings")
+                        cvc_lang = gr.Dropdown(
+                            label="Language / 语种",
+                            choices=_conversation_language_choices(),
+                            value=_conversation_language_choices()[0],
+                            allow_custom_value=False,
+                            interactive=True,
+                        )
+                        cvc_sp = gr.Slider(
+                            0.5,
+                            1.5,
+                            value=1.0,
+                            step=0.05,
+                            label="Speed",
+                            info="1.0 = normal. >1 faster, <1 slower.",
+                        )
+                        cvc_pause = gr.Slider(
+                            0,
+                            3000,
+                            value=300,
+                            step=50,
+                            label="Pause between lines (ms)",
+                        )
+                        with gr.Row():
+                            cvc_validate_btn = gr.Button("Validate")
+                            cvc_generate_btn = gr.Button("Generate", variant="primary")
+                            cvc_reset_btn = gr.Button("Reset Conversation")
+
+                        cvc_summary = gr.Textbox(label="Summary", lines=5)
+                        cvc_status = gr.Textbox(label="Status / 状态", lines=2)
+                        cvc_audio = gr.Audio(
+                            label="Conversation Audio",
+                            type="filepath",
+                        )
+                        cvc_download = gr.File(label="Download WAV")
+                        cvc_metadata = gr.Textbox(label="Metadata", lines=3)
+
+                cvc_validate_inputs = [
+                    cvc_lang,
+                    cvc_sp,
+                    cvc_pause,
+                    cvc_dialogue_df,
+                    *cvc_slot_inputs,
+                ]
+
+                cvc_validate_btn.click(
+                    _validate_conversation_adapter,
+                    inputs=cvc_validate_inputs,
+                    outputs=[
+                        conversation_validation_state,
+                        cvc_summary,
+                        cvc_status,
+                    ],
+                )
+
+                cvc_generate_btn.click(
+                    _generate_conversation_adapter,
+                    inputs=cvc_validate_inputs,
+                    outputs=[
+                        conversation_validation_state,
+                        cvc_summary,
+                        cvc_status,
+                        cvc_audio,
+                        cvc_download,
+                        cvc_metadata,
+                    ],
+                )
+
+                cvc_reset_btn.click(
+                    _reset_conversation_outputs,
+                    outputs=[
+                        conversation_validation_state,
+                        cvc_dialogue_df,
+                        cvc_summary,
+                        cvc_status,
+                        cvc_audio,
+                        cvc_download,
+                        cvc_metadata,
+                    ],
+                )
+
+                cvc_dialogue_csv.change(
+                    _import_dialogue_csv,
+                    inputs=cvc_dialogue_csv,
+                    outputs=[cvc_dialogue_df, cvc_summary, cvc_status],
+                )
+
+                cvc_export_btn.click(
+                    _export_dialogue_csv,
+                    inputs=cvc_dialogue_df,
+                    outputs=[cvc_export_file, cvc_status],
                 )
 
             # ==============================================================

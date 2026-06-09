@@ -12,6 +12,8 @@ Mục tiêu là:
 - Những lần chạy sau không phải tải lại nếu cache và thư mục model còn nguyên
 
 > Ghi chú: luồng tối ưu bên dưới **không bật ASR mặc định**. Bạn sẽ tự nhập `ref_text` trong Web UI. ASR, ví dụ Whisper, chỉ là lựa chọn thêm và không nằm trong flow tối ưu này.
+>
+> Ghi chú quan trọng: **cả workflow PyPI Web UI và workflow fork đều cố ý dùng chung một gốc Drive là `/content/drive/MyDrive/omnivoice_colab`**. Cache nằm ở `/content/drive/MyDrive/omnivoice_colab/cache`, model nằm ở `/content/drive/MyDrive/omnivoice_colab/models`. Vì vậy, nếu bạn đã tải model ở workflow PyPI trước đó rồi chuyển sang workflow fork, bạn thường sẽ không phải tải lại model.
 
 ---
 
@@ -73,10 +75,11 @@ from google.colab import drive
 drive.mount('/content/drive')
 ```
 
-Sau khi mount, bạn có thể dùng một thư mục riêng để chứa cache và model, ví dụ:
+Sau khi mount, cả 2 workflow sẽ dùng chung cấu trúc thư mục này:
 
-- `/content/drive/MyDrive/omnivoice-cache`
-- `/content/drive/MyDrive/omnivoice-models`
+- `/content/drive/MyDrive/omnivoice_colab`
+- `/content/drive/MyDrive/omnivoice_colab/cache`
+- `/content/drive/MyDrive/omnivoice_colab/models`
 
 ---
 
@@ -88,21 +91,29 @@ Cell này giúp Hugging Face và Transformers lưu dữ liệu vào Drive.
 import os
 from pathlib import Path
 
-DRIVE_ROOT = Path("/content/drive/MyDrive")
-OMNIVOICE_CACHE = DRIVE_ROOT / "omnivoice-cache"
-OMNIVOICE_MODELS = DRIVE_ROOT / "omnivoice-models"
+BASE_DIR = Path("/content/drive/MyDrive/omnivoice_colab")
+CACHE_DIR = BASE_DIR / "cache"
+MODEL_DIR = BASE_DIR / "models"
+OMNIVOICE_MODEL_DIR = MODEL_DIR / "OmniVoice"
+AUDIO_TOKENIZER_DIR = MODEL_DIR / "higgs-audio-v2-tokenizer"
 
-OMNIVOICE_CACHE.mkdir(parents=True, exist_ok=True)
-OMNIVOICE_MODELS.mkdir(parents=True, exist_ok=True)
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+MODEL_DIR.mkdir(parents=True, exist_ok=True)
+OMNIVOICE_MODEL_DIR.mkdir(parents=True, exist_ok=True)
+AUDIO_TOKENIZER_DIR.mkdir(parents=True, exist_ok=True)
 
-os.environ["HF_HOME"] = str(OMNIVOICE_CACHE / "hf-home")
-os.environ["HF_HUB_CACHE"] = str(OMNIVOICE_CACHE / "hf-hub")
-os.environ["TRANSFORMERS_CACHE"] = str(OMNIVOICE_CACHE / "transformers-cache")
+os.environ["HF_HOME"] = str(CACHE_DIR / "hf-home")
+os.environ["HF_HUB_CACHE"] = str(CACHE_DIR / "hf-hub")
+os.environ["TRANSFORMERS_CACHE"] = str(CACHE_DIR / "transformers-cache")
 
+print("BASE_DIR =", BASE_DIR)
+print("CACHE_DIR =", CACHE_DIR)
+print("MODEL_DIR =", MODEL_DIR)
+print("OMNIVOICE_MODEL_DIR =", OMNIVOICE_MODEL_DIR)
+print("AUDIO_TOKENIZER_DIR =", AUDIO_TOKENIZER_DIR)
 print("HF_HOME =", os.environ["HF_HOME"])
 print("HF_HUB_CACHE =", os.environ["HF_HUB_CACHE"])
 print("TRANSFORMERS_CACHE =", os.environ["TRANSFORMERS_CACHE"])
-print("OMNIVOICE_MODELS =", OMNIVOICE_MODELS)
 ```
 
 ### Ghi chú tương thích
@@ -110,6 +121,7 @@ print("OMNIVOICE_MODELS =", OMNIVOICE_MODELS)
 - `HF_HOME` và `HF_HUB_CACHE` là biến chính cho hệ sinh thái Hugging Face hiện nay.
 - `TRANSFORMERS_CACHE` vẫn nên giữ để tương thích với một số luồng cũ hoặc dependency cũ.
 - Nếu bạn đã mount Drive và giữ nguyên các thư mục này, những lần chạy sau thường sẽ không cần tải lại model.
+- Vì workflow A và workflow B dùng cùng `BASE_DIR`, chúng cũng dùng chung cache và model.
 
 ---
 
@@ -137,28 +149,23 @@ print("HF_ENDPOINT =", os.environ["HF_ENDPOINT"])
 Cell này tải trước các model cần dùng cho flow `--no-asr`.
 
 ```python
-import os
 from huggingface_hub import snapshot_download
-
-base_dir = "/content/drive/MyDrive/omnivoice-models"
-omnivoice_dir = os.path.join(base_dir, "OmniVoice")
-tokenizer_dir = os.path.join(base_dir, "higgs-audio-v2-tokenizer")
 
 snapshot_download(
     repo_id="k2-fsa/OmniVoice",
-    local_dir=omnivoice_dir,
+    local_dir=str(OMNIVOICE_MODEL_DIR),
     local_dir_use_symlinks=False,
 )
 
 snapshot_download(
     repo_id="eustlb/higgs-audio-v2-tokenizer",
-    local_dir=tokenizer_dir,
+    local_dir=str(AUDIO_TOKENIZER_DIR),
     local_dir_use_symlinks=False,
 )
 
 print("Done")
-print("OmniVoice model:", omnivoice_dir)
-print("Tokenizer:", tokenizer_dir)
+print("OmniVoice model:", OMNIVOICE_MODEL_DIR)
+print("Tokenizer:", AUDIO_TOKENIZER_DIR)
 ```
 
 ### Lần đầu chạy sẽ xảy ra gì
@@ -170,9 +177,9 @@ print("Tokenizer:", tokenizer_dir)
 ### Những lần chạy sau sẽ ra sao
 
 Nếu các thư mục sau vẫn còn trong Drive:
-- `omnivoice-cache/...`
-- `omnivoice-models/OmniVoice`
-- `omnivoice-models/higgs-audio-v2-tokenizer`
+- `omnivoice_colab/cache/...`
+- `omnivoice_colab/models/OmniVoice`
+- `omnivoice_colab/models/higgs-audio-v2-tokenizer`
 
 thì thông thường Colab sẽ dùng lại dữ liệu đã có và nhanh hơn nhiều.
 
@@ -185,12 +192,12 @@ thì thông thường Colab sẽ dùng lại dữ liệu đã có và nhanh hơn
 Đây là lệnh tối ưu cho Web UI khi bạn muốn tránh phần ASR mặc định.
 
 ```bash
-!omnivoice-demo --model /content/drive/MyDrive/omnivoice-models/OmniVoice --device cuda:0 --no-asr --share
+!omnivoice-demo --model /content/drive/MyDrive/omnivoice_colab/models/OmniVoice --device cuda:0 --no-asr --share
 ```
 
 ### Ý nghĩa các tham số
 
-- `--model /content/drive/MyDrive/omnivoice-models/OmniVoice`: dùng model đã lưu trong Drive
+- `--model /content/drive/MyDrive/omnivoice_colab/models/OmniVoice`: dùng model đã lưu trong Drive
 - `--device cuda:0`: chạy bằng GPU đầu tiên
 - `--no-asr`: tắt nhận dạng lời nói tự động
 - `--share`: tạo link public của Gradio để mở giao diện
@@ -240,12 +247,25 @@ drive.mount('/content/drive')
 
 ```python
 import os
+from pathlib import Path
 
-os.environ["HF_HOME"] = "/content/drive/MyDrive/omnivoice-cache/hf-home"
-os.environ["HF_HUB_CACHE"] = "/content/drive/MyDrive/omnivoice-cache/hf-hub"
-os.environ["TRANSFORMERS_CACHE"] = "/content/drive/MyDrive/omnivoice-cache/transformers-cache"
+BASE_DIR = Path("/content/drive/MyDrive/omnivoice_colab")
+CACHE_DIR = BASE_DIR / "cache"
+MODEL_DIR = BASE_DIR / "models"
+OMNIVOICE_MODEL_DIR = MODEL_DIR / "OmniVoice"
+AUDIO_TOKENIZER_DIR = MODEL_DIR / "higgs-audio-v2-tokenizer"
+
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+MODEL_DIR.mkdir(parents=True, exist_ok=True)
+OMNIVOICE_MODEL_DIR.mkdir(parents=True, exist_ok=True)
+AUDIO_TOKENIZER_DIR.mkdir(parents=True, exist_ok=True)
+
+os.environ["HF_HOME"] = str(CACHE_DIR / "hf-home")
+os.environ["HF_HUB_CACHE"] = str(CACHE_DIR / "hf-hub")
+os.environ["TRANSFORMERS_CACHE"] = str(CACHE_DIR / "transformers-cache")
 
 print("Cache env restored")
+print("OMNIVOICE_MODEL_DIR =", OMNIVOICE_MODEL_DIR)
 ```
 
 ### Cell C, cài package
@@ -257,7 +277,7 @@ print("Cache env restored")
 ### Cell D, chạy UI
 
 ```bash
-!omnivoice-demo --model /content/drive/MyDrive/omnivoice-models/OmniVoice --device cuda:0 --no-asr --share
+!omnivoice-demo --model /content/drive/MyDrive/omnivoice_colab/models/OmniVoice --device cuda:0 --no-asr --share
 ```
 
 Nếu Colab instance mới hoàn toàn, bạn vẫn phải cài lại package trong môi trường hiện tại. Nhưng model không cần tải lại nếu đã có trong Drive.
@@ -274,7 +294,7 @@ Workflow này dành cho trường hợp bạn muốn:
 ### Nguyên tắc nên giữ
 
 - **Code repo** để trong `/content/OmniVoice`
-- **Model và cache** để trong Google Drive
+- **Model và cache** để trong Google Drive, cùng một `BASE_DIR`
 - Không nhét cả repo vào Drive nếu bạn chỉ cần giữ model bền vững
 
 ---
@@ -290,17 +310,29 @@ drive.mount('/content/drive')
 import os
 from pathlib import Path
 
-DRIVE_ROOT = Path("/content/drive/MyDrive")
-OMNIVOICE_CACHE = DRIVE_ROOT / "omnivoice-cache"
-OMNIVOICE_MODELS = DRIVE_ROOT / "omnivoice-models"
+BASE_DIR = Path("/content/drive/MyDrive/omnivoice_colab")
+CACHE_DIR = BASE_DIR / "cache"
+MODEL_DIR = BASE_DIR / "models"
+OMNIVOICE_MODEL_DIR = MODEL_DIR / "OmniVoice"
+AUDIO_TOKENIZER_DIR = MODEL_DIR / "higgs-audio-v2-tokenizer"
 
-OMNIVOICE_CACHE.mkdir(parents=True, exist_ok=True)
-OMNIVOICE_MODELS.mkdir(parents=True, exist_ok=True)
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+MODEL_DIR.mkdir(parents=True, exist_ok=True)
+OMNIVOICE_MODEL_DIR.mkdir(parents=True, exist_ok=True)
+AUDIO_TOKENIZER_DIR.mkdir(parents=True, exist_ok=True)
 
-os.environ["HF_HOME"] = str(OMNIVOICE_CACHE / "hf-home")
-os.environ["HF_HUB_CACHE"] = str(OMNIVOICE_CACHE / "hf-hub")
-os.environ["TRANSFORMERS_CACHE"] = str(OMNIVOICE_CACHE / "transformers-cache")
+os.environ["HF_HOME"] = str(CACHE_DIR / "hf-home")
+os.environ["HF_HUB_CACHE"] = str(CACHE_DIR / "hf-hub")
+os.environ["TRANSFORMERS_CACHE"] = str(CACHE_DIR / "transformers-cache")
+
+print("BASE_DIR =", BASE_DIR)
+print("CACHE_DIR =", CACHE_DIR)
+print("MODEL_DIR =", MODEL_DIR)
+print("OMNIVOICE_MODEL_DIR =", OMNIVOICE_MODEL_DIR)
+print("AUDIO_TOKENIZER_DIR =", AUDIO_TOKENIZER_DIR)
 ```
+
+Cell này cố ý giống workflow A để 2 workflow dùng cùng cache và cùng thư mục model.
 
 ---
 
@@ -352,26 +384,23 @@ Nếu nó trỏ về thư mục `site-packages` của môi trường Python, ngh
 Nếu bạn đã từng tải model trước đó rồi thì thường có thể bỏ qua cell này.
 
 ```python
-import os
 from huggingface_hub import snapshot_download
-
-base_dir = "/content/drive/MyDrive/omnivoice-models"
-omnivoice_dir = os.path.join(base_dir, "OmniVoice")
-tokenizer_dir = os.path.join(base_dir, "higgs-audio-v2-tokenizer")
 
 snapshot_download(
     repo_id="k2-fsa/OmniVoice",
-    local_dir=omnivoice_dir,
+    local_dir=str(OMNIVOICE_MODEL_DIR),
     local_dir_use_symlinks=False,
 )
 
 snapshot_download(
     repo_id="eustlb/higgs-audio-v2-tokenizer",
-    local_dir=tokenizer_dir,
+    local_dir=str(AUDIO_TOKENIZER_DIR),
     local_dir_use_symlinks=False,
 )
 
 print("Done")
+print("OmniVoice model:", OMNIVOICE_MODEL_DIR)
+print("Tokenizer:", AUDIO_TOKENIZER_DIR)
 ```
 
 ---
@@ -380,7 +409,7 @@ print("Done")
 
 ```bash
 %cd /content/OmniVoice
-!omnivoice-demo --model /content/drive/MyDrive/omnivoice-models/OmniVoice --device cuda:0 --no-asr --share
+!omnivoice-demo --model /content/drive/MyDrive/omnivoice_colab/models/OmniVoice --device cuda:0 --no-asr --share
 ```
 
 Nếu branch của bạn có sửa CLI hoặc Web UI, Colab sẽ dùng đúng code trong fork, miễn là `pip install -e .` đã chạy thành công.
@@ -426,13 +455,16 @@ print(omnivoice.__file__)
 ### Nên làm
 
 - Giữ **code** ở `/content/OmniVoice`
-- Giữ **cache** ở `/content/drive/MyDrive/omnivoice-cache`
-- Giữ **model** ở `/content/drive/MyDrive/omnivoice-models`
+- Giữ **gốc Drive chung** ở `/content/drive/MyDrive/omnivoice_colab`
+- Giữ **cache** ở `/content/drive/MyDrive/omnivoice_colab/cache`
+- Giữ **model** ở `/content/drive/MyDrive/omnivoice_colab/models`
+- Dùng cùng các biến `BASE_DIR`, `CACHE_DIR`, `MODEL_DIR`, `OMNIVOICE_MODEL_DIR`, `AUDIO_TOKENIZER_DIR` cho cả 2 workflow
 
 ### Không nên làm
 
 - Không phụ thuộc vào code trong `/content` để lưu lâu dài, vì Colab reset là mất
 - Không trộn lung tung giữa thư mục code và thư mục model
+- Không tách riêng mỗi workflow sang một thư mục model hoặc cache khác nhau nếu bạn muốn tránh tải lại
 - Không coi ASR là mặc định trong flow tối ưu này
 
 ---
@@ -559,16 +591,20 @@ drive.mount('/content/drive')
 import os
 from pathlib import Path
 
-DRIVE_ROOT = Path("/content/drive/MyDrive")
-OMNIVOICE_CACHE = DRIVE_ROOT / "omnivoice-cache"
-OMNIVOICE_MODELS = DRIVE_ROOT / "omnivoice-models"
+BASE_DIR = Path("/content/drive/MyDrive/omnivoice_colab")
+CACHE_DIR = BASE_DIR / "cache"
+MODEL_DIR = BASE_DIR / "models"
+OMNIVOICE_MODEL_DIR = MODEL_DIR / "OmniVoice"
+AUDIO_TOKENIZER_DIR = MODEL_DIR / "higgs-audio-v2-tokenizer"
 
-OMNIVOICE_CACHE.mkdir(parents=True, exist_ok=True)
-OMNIVOICE_MODELS.mkdir(parents=True, exist_ok=True)
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+MODEL_DIR.mkdir(parents=True, exist_ok=True)
+OMNIVOICE_MODEL_DIR.mkdir(parents=True, exist_ok=True)
+AUDIO_TOKENIZER_DIR.mkdir(parents=True, exist_ok=True)
 
-os.environ["HF_HOME"] = str(OMNIVOICE_CACHE / "hf-home")
-os.environ["HF_HUB_CACHE"] = str(OMNIVOICE_CACHE / "hf-hub")
-os.environ["TRANSFORMERS_CACHE"] = str(OMNIVOICE_CACHE / "transformers-cache")
+os.environ["HF_HOME"] = str(CACHE_DIR / "hf-home")
+os.environ["HF_HUB_CACHE"] = str(CACHE_DIR / "hf-hub")
+os.environ["TRANSFORMERS_CACHE"] = str(CACHE_DIR / "transformers-cache")
 ```
 
 ### Cell 3
@@ -581,18 +617,17 @@ os.environ["TRANSFORMERS_CACHE"] = str(OMNIVOICE_CACHE / "transformers-cache")
 ### Cell 4
 
 ```python
-import os
 from huggingface_hub import snapshot_download
 
 snapshot_download(
     repo_id="k2-fsa/OmniVoice",
-    local_dir="/content/drive/MyDrive/omnivoice-models/OmniVoice",
+    local_dir=str(OMNIVOICE_MODEL_DIR),
     local_dir_use_symlinks=False,
 )
 
 snapshot_download(
     repo_id="eustlb/higgs-audio-v2-tokenizer",
-    local_dir="/content/drive/MyDrive/omnivoice-models/higgs-audio-v2-tokenizer",
+    local_dir=str(AUDIO_TOKENIZER_DIR),
     local_dir_use_symlinks=False,
 )
 ```
@@ -600,7 +635,7 @@ snapshot_download(
 ### Cell 5
 
 ```bash
-!omnivoice-demo --model /content/drive/MyDrive/omnivoice-models/OmniVoice --device cuda:0 --no-asr --share
+!omnivoice-demo --model /content/drive/MyDrive/omnivoice_colab/models/OmniVoice --device cuda:0 --no-asr --share
 ```
 
 ---
@@ -608,7 +643,8 @@ snapshot_download(
 ## 21. Tóm tắt ngắn
 
 - Muốn chạy nhanh và ổn định trên Colab, hãy cài từ PyPI, mount Drive, lưu cache model vào Drive, rồi chạy `omnivoice-demo` với `--no-asr`.
+- Cả workflow PyPI và workflow fork đều dùng chung `/content/drive/MyDrive/omnivoice_colab`, nên thường không phải tải lại model khi chuyển workflow.
 - Trong flow `--no-asr`, bạn phải tự nhập `ref_text` trong Web UI.
 - Lần đầu sẽ tải model. Những lần sau thường chỉ cần mount Drive, set env, cài package, rồi launch lại UI.
 - Nếu bạn cần test code riêng, clone fork bằng `git clone -b <branch> https://github.com/<YOUR_USERNAME>/OmniVoice.git`, chạy `pip install -e .`, rồi kiểm tra `omnivoice.__file__` để chắc là Colab đang dùng đúng source của bạn.
-- Hãy giữ code trong `/content` và giữ model trong Drive.
+- Hãy giữ code trong `/content`, giữ cache trong `/content/drive/MyDrive/omnivoice_colab/cache`, và giữ model trong `/content/drive/MyDrive/omnivoice_colab/models`.
