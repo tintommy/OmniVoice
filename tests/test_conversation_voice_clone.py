@@ -133,6 +133,14 @@ class ConversationVoiceCloneTests(unittest.TestCase):
         imported = import_dialogue_lines_csv(exported)
         self.assertEqual(imported, dialogue_lines)
 
+        bom_imported = import_dialogue_lines_csv(
+            "\ufeffspeaker_name,text\nAlice,Tiếng Việt có dấu: xin chào thế giới\n"
+        )
+        self.assertEqual(
+            bom_imported,
+            [DialogueLine(speaker_name="Alice", text="Tiếng Việt có dấu: xin chào thế giới")],
+        )
+
         formula_exported = export_dialogue_lines_csv(
             [DialogueLine(speaker_name="Alice", text="=IMPORTDATA('http://example.com')")]
         )

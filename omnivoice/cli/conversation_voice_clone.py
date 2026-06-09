@@ -263,9 +263,12 @@ def export_dialogue_lines_csv(dialogue_lines: Sequence[DialogueLine]) -> str:
 
 
 def import_dialogue_lines_csv(csv_text: str) -> list[DialogueLine]:
+    csv_text = csv_text.lstrip("\ufeff")
     reader = csv.DictReader(csv_text.splitlines())
-    if reader.fieldnames != list(CSV_COLUMNS):
+    fieldnames = [name.lstrip("\ufeff") for name in (reader.fieldnames or [])]
+    if fieldnames != list(CSV_COLUMNS):
         raise ConversationVoiceCloneError("CSV must contain exactly the columns: speaker_name,text")
+    reader.fieldnames = fieldnames
 
     rows: list[DialogueLine] = []
     for row in reader:

@@ -330,7 +330,7 @@ def build_demo(
             raise gr.Error("Dialogue CSV must be a .csv file.")
 
         try:
-            imported_lines = import_dialogue_lines_csv(path.read_text(encoding="utf-8"))
+            imported_lines = import_dialogue_lines_csv(path.read_text(encoding="utf-8-sig"))
         except ConversationVoiceCloneError as exc:
             raise gr.Error(str(exc)) from exc
 
@@ -350,9 +350,15 @@ def build_demo(
         ]
         output_path.write_text(
             export_dialogue_lines_csv(dialogue_lines),
-            encoding="utf-8",
+            encoding="utf-8-sig",
         )
         return str(output_path), "Dialogue CSV exported."
+
+    def _export_sample_dialogue_csv():
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = Path(tempfile.gettempdir()) / f"conversation_voice_clone_dialogue_sample_{timestamp}.csv"
+        output_path.write_text("speaker_name,text\n", encoding="utf-8-sig")
+        return str(output_path), "Sample Dialogue CSV exported."
 
     # -- shared generation core --
     def _gen_core(
@@ -658,26 +664,6 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                                 )
 
                     with gr.Column(scale=1):
-                        gr.Markdown("### Dialogue Lines")
-                        cvc_dialogue_csv = gr.File(
-                            label="Import Dialogue CSV",
-                            file_types=[".csv"],
-                            type="filepath",
-                        )
-                        cvc_dialogue_df = gr.Dataframe(
-                            headers=["speaker_name", "text"],
-                            datatype=["str", "str"],
-                            row_count=(5, "dynamic"),
-                            col_count=(2, "fixed"),
-                            value=_empty_dialogue_rows(),
-                            interactive=True,
-                            wrap=True,
-                            label="Dialogue Lines",
-                            max_height=500,
-                        )
-                        with gr.Row():
-                            cvc_export_btn = gr.Button("Export Dialogue CSV")
-                            cvc_export_file = gr.File(label="Dialogue CSV Export")
                         gr.Markdown("### Conversation Settings")
                         cvc_lang = gr.Dropdown(
                             label="Language / 语种",
@@ -714,6 +700,34 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                         )
                         cvc_download = gr.File(label="Download WAV")
                         cvc_metadata = gr.Textbox(label="Metadata", lines=3)
+
+                gr.Markdown("### Dialogue Lines")
+                gr.Markdown(
+                    "Use `speaker_name,text` CSV format. The speaker column is intentionally narrow; put long Vietnamese dialogue in the text column."
+                )
+                with gr.Row():
+                    cvc_dialogue_csv = gr.File(
+                        label="Import Dialogue CSV",
+                        file_types=[".csv"],
+                        type="filepath",
+                    )
+                    cvc_sample_btn = gr.Button("Export Sample CSV")
+                    cvc_sample_file = gr.File(label="Sample CSV")
+                cvc_dialogue_df = gr.Dataframe(
+                    headers=["speaker_name", "text"],
+                    datatype=["str", "str"],
+                    row_count=(5, "dynamic"),
+                    col_count=(2, "fixed"),
+                    value=_empty_dialogue_rows(),
+                    interactive=True,
+                    wrap=True,
+                    label="Dialogue Lines",
+                    max_height=700,
+                    column_widths=["30%", "70%"],
+                )
+                with gr.Row():
+                    cvc_export_btn = gr.Button("Export Dialogue CSV")
+                    cvc_export_file = gr.File(label="Dialogue CSV Export")
 
                 cvc_validate_inputs = [
                     cvc_lang,
@@ -763,6 +777,11 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                     _import_dialogue_csv,
                     inputs=cvc_dialogue_csv,
                     outputs=[cvc_dialogue_df, cvc_summary, cvc_status],
+                )
+
+                cvc_sample_btn.click(
+                    _export_sample_dialogue_csv,
+                    outputs=[cvc_sample_file, cvc_status],
                 )
 
                 cvc_export_btn.click(
