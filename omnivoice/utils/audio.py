@@ -37,6 +37,49 @@ from pydub.silence import detect_leading_silence, detect_nonsilent, split_on_sil
 logger = logging.getLogger(__name__)
 
 
+def concatenate_audio_with_silence(
+    chunks: list[np.ndarray],
+    sample_rate: int,
+    silence_duration: float = 0.3,
+) -> np.ndarray:
+    """Concatenate audio chunks with silence-only gaps.
+
+    Args:
+        chunks: List of numpy arrays in soundfile-compatible shape: ``(T,)``
+            for mono or ``(T, C)`` for multi-channel audio.
+        sample_rate: Audio sample rate.
+        silence_duration: Gap duration in seconds.
+
+    Returns:
+        Concatenated numpy array with zero-valued silence between chunks.
+    """
+    if not chunks:
+        return np.array([], dtype=np.float32)
+
+    normalized_chunks = [np.asarray(chunk, dtype=np.float32) for chunk in chunks]
+    if len(normalized_chunks) == 1:
+        return normalized_chunks[0].copy()
+
+    first_shape = normalized_chunks[0].shape[1:]
+    for chunk in normalized_chunks:
+        if chunk.ndim not in (1, 2):
+            raise ValueError("Audio chunks must be 1D mono or 2D channel-last arrays.")
+        if chunk.shape[1:] != first_shape:
+            raise ValueError("All audio chunks must have the same channel shape.")
+
+    silence_frames = int(round(sample_rate * silence_duration))
+    silence_shape = (silence_frames, *first_shape)
+    silence = np.zeros(silence_shape, dtype=np.float32)
+
+    parts: list[np.ndarray] = []
+    for index, chunk in enumerate(normalized_chunks):
+        parts.append(chunk)
+        if index < len(normalized_chunks) - 1 and silence_frames > 0:
+            parts.append(silence)
+
+    return np.concatenate(parts, axis=0)
+
+
 # ---------------------------------------------------------------------------
 # Loading
 # ---------------------------------------------------------------------------

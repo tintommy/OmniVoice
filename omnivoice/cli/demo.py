@@ -474,6 +474,8 @@ def build_demo(
         preprocess_prompt: bool,
         postprocess_output: bool,
         queue_rows: Any,
+        apply_pause_between_files: bool,
+        pause_between_files_ms: float | None,
         progress=gr.Progress(),
     ):
         if validation_state is None:
@@ -517,6 +519,8 @@ def build_demo(
                 instruct=validation_state.get("instruct"),
                 speed=1.0 if validation_state.get("speed") is None else float(validation_state["speed"]),
                 duration=validation_state.get("duration"),
+                apply_pause_between_files=bool(apply_pause_between_files),
+                pause_between_files_ms=int(pause_between_files_ms or 0),
             )
             result = generate_voice_clone_queue(
                 model=model,
@@ -527,17 +531,28 @@ def build_demo(
             metadata = {
                 "wav_paths": result.wav_paths,
                 "zip_path": result.zip_path,
+                "merged_wav_path": result.merged_wav_path,
                 "queue_items_generated": result.metadata["queue_items"],
                 "total_characters": result.metadata["total_characters"],
                 "zip_filename": Path(result.zip_path).name,
+                "merged_wav_filename": Path(result.merged_wav_path).name,
+                "pause_between_files_ms": result.metadata["pause_between_files_ms"],
+                "apply_pause_between_files": result.metadata["apply_pause_between_files"],
                 "status": "Done. Please click Validate Queue again before generating another queue.",
             }
         except VoiceCloneQueueError as exc:
             raise gr.Error(str(exc)) from exc
+        pause_text = (
+            f"{metadata['pause_between_files_ms']}ms"
+            if metadata.get("apply_pause_between_files")
+            else "No pause"
+        )
         metadata_text = (
             f"Queue items generated: {metadata['queue_items_generated']}\n"
             f"Total text characters: {metadata['total_characters']}\n"
-            f"ZIP filename: {metadata['zip_filename']}"
+            f"ZIP filename: {metadata['zip_filename']}\n"
+            f"Merged audio: {metadata['merged_wav_filename']}\n"
+            f"Pause between files: {pause_text}"
         )
         return (
             None,
@@ -548,6 +563,7 @@ def build_demo(
             ),
             metadata.get("wav_paths") or metadata.get("audio_paths"),
             metadata.get("zip_path") or metadata.get("download_path"),
+            metadata.get("merged_wav_path"),
             metadata_text,
         )
 
@@ -880,6 +896,19 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                         )
                         
                         with gr.Row():
+                            queue_apply_pause = gr.Checkbox(
+                                label="Apply pause between merged files",
+                                value=True,
+                            )
+                            queue_pause_ms = gr.Number(
+                                label="Pause duration (ms)",
+                                value=300,
+                                minimum=0,
+                                maximum=5000,
+                                step=50,
+                            )
+
+                        with gr.Row():
                             queue_validate_btn = gr.Button("Validate Queue")
                             queue_generate_btn = gr.Button("Generate Queue", variant="primary")
                         
@@ -890,7 +919,8 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                             file_count="multiple",
                         )
                         queue_zip_file = gr.File(label="Download All Queue WAVs (ZIP)")
-                        queue_metadata = gr.Textbox(label="Queue Metadata", lines=3)
+                        queue_merged_wav_file = gr.File(label="Download Merged Queue Audio (WAV)")
+                        queue_metadata = gr.Textbox(label="Queue Metadata", lines=5)
 
                         queue_csv_import.change(
                             _import_queue_csv,
@@ -940,6 +970,8 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                                 vc_pp,
                                 vc_po,
                                 queue_df,
+                                queue_apply_pause,
+                                queue_pause_ms,
                             ],
                             outputs=[
                                 queue_validation_state,
@@ -947,6 +979,7 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                                 queue_status,
                                 queue_wav_files,
                                 queue_zip_file,
+                                queue_merged_wav_file,
                                 queue_metadata,
                             ],
                         )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import importlib.util
 import os
 import shutil
 import zipfile
@@ -11,6 +12,17 @@ from tempfile import gettempdir, mkdtemp
 from typing import Any, Iterable, Sequence
 
 import soundfile as sf
+
+_AUDIO_UTILS_PATH = Path(__file__).resolve().parents[1] / "utils" / "audio.py"
+_AUDIO_UTILS_SPEC = importlib.util.spec_from_file_location(
+    "omnivoice_audio_utils",
+    _AUDIO_UTILS_PATH,
+)
+if _AUDIO_UTILS_SPEC is None or _AUDIO_UTILS_SPEC.loader is None:
+    raise ImportError(f"Unable to load audio utilities from {_AUDIO_UTILS_PATH}")
+_AUDIO_UTILS = importlib.util.module_from_spec(_AUDIO_UTILS_SPEC)
+_AUDIO_UTILS_SPEC.loader.exec_module(_AUDIO_UTILS)
+concatenate_audio_with_silence = _AUDIO_UTILS.concatenate_audio_with_silence
 
 DEFAULT_OUTPUT_FORMAT = "WAV"
 DEFAULT_DOWNLOAD_FORMAT = "ZIP"
@@ -35,6 +47,8 @@ class VoiceCloneQueueRequest:
     output_dir: Path | None = None
     speed: float = 1.0
     duration: float | None = None
+    apply_pause_between_files: bool = True
+    pause_between_files_ms: int = 300
 
 
 @dataclass(frozen=True)
@@ -51,6 +65,7 @@ class VoiceCloneQueueResult:
     wav_paths: list[str]
     zip_path: str
     metadata: dict[str, Any]
+    merged_wav_path: str
 
 
 class VoiceCloneQueueError(ValueError):
@@ -197,6 +212,12 @@ def validate_queue_request(request: VoiceCloneQueueRequest) -> VoiceCloneQueueVa
             f"Queue must not exceed {MAX_TOTAL_CHARACTERS} total characters."
         )
 
+    if request.apply_pause_between_files:
+        if not isinstance(request.pause_between_files_ms, int):
+            raise VoiceCloneQueueError("pause_between_files_ms must be an integer.")
+        if request.pause_between_files_ms < 0 or request.pause_between_files_ms > 5000:
+            raise VoiceCloneQueueError("pause_between_files_ms must be between 0 and 5000.")
+
     return VoiceCloneQueueValidationSummary(
         queue_items=len(request.items),
         total_characters=total_characters,
@@ -247,6 +268,7 @@ def _write_wav(path: Path, audio: Any, sample_rate: int) -> None:
     sf.write(path, audio, sample_rate)
 
 
+
 def generate_voice_clone_queue(
     *,
     model: Any,
@@ -258,7 +280,9 @@ def generate_voice_clone_queue(
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     work_dir = _resolve_work_dir(request.output_dir)
     wav_paths: list[Path] = []
+    audio_arrays: list[np.ndarray] = []
     zip_path = work_dir / f"voice_clone_queue_{timestamp}.zip"
+    merged_wav_path = work_dir / f"voice_clone_queue_{timestamp}_merged.wav"
 
     try:
         voice_clone_prompt = model.create_voice_clone_prompt(
@@ -291,6 +315,7 @@ def generate_voice_clone_queue(
             wav_path = work_dir / f"voice_clone_queue_{timestamp}_{index:03d}.wav"
             _write_wav(wav_path, audio, int(model.sampling_rate))
             wav_paths.append(wav_path)
+            audio_arrays.append(audio)
 
         with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             for wav_path in wav_paths:
@@ -299,11 +324,22 @@ def generate_voice_clone_queue(
                     raise VoiceCloneQueueGenerationError("Unsafe queue output filename.")
                 archive.write(wav_path, arcname=arcname)
 
+        pause_ms = request.pause_between_files_ms if request.apply_pause_between_files else 0
+        merged_audio = concatenate_audio_with_silence(
+            audio_arrays,
+            int(model.sampling_rate),
+            pause_ms / 1000.0,
+        )
+        _write_wav(merged_wav_path, merged_audio, int(model.sampling_rate))
+
         metadata = {
             "queue_items": summary.queue_items,
             "total_characters": summary.total_characters,
             "sampling_rate": int(model.sampling_rate),
             "zip_members": [path.name for path in wav_paths],
+            "merged_wav_filename": merged_wav_path.name,
+            "pause_between_files_ms": pause_ms,
+            "apply_pause_between_files": bool(request.apply_pause_between_files),
         }
         # Keep the work directory on success because Gradio serves returned file paths
         # after the handler returns. Failure paths remove the whole directory below.
@@ -311,6 +347,7 @@ def generate_voice_clone_queue(
             wav_paths=[str(path) for path in wav_paths],
             zip_path=str(zip_path),
             metadata=metadata,
+            merged_wav_path=str(merged_wav_path),
         )
     except Exception as exc:
         shutil.rmtree(work_dir, ignore_errors=True)

@@ -29,6 +29,7 @@ DEFAULT_OUTPUT_FORMAT = voice_clone_queue.DEFAULT_OUTPUT_FORMAT
 QueuedCloneItem = voice_clone_queue.QueuedCloneItem
 ValidationStateError = voice_clone_queue.ValidationStateError
 VoiceCloneQueueError = voice_clone_queue.VoiceCloneQueueError
+VoiceCloneQueueGenerationError = voice_clone_queue.VoiceCloneQueueGenerationError
 VoiceCloneQueueRequest = voice_clone_queue.VoiceCloneQueueRequest
 create_validation_data = voice_clone_queue.create_validation_data
 export_queue_csv = voice_clone_queue.export_queue_csv
@@ -83,6 +84,184 @@ class FakeModel:
 
 
 class VoiceCloneQueueTests(unittest.TestCase):
+    def test_merged_wav_created_for_basic_queue(self):
+        model = FakeModel()
+        request = VoiceCloneQueueRequest(
+            items=[
+                QueuedCloneItem(text="First"),
+                QueuedCloneItem(text="Second"),
+            ],
+            ref_audio="audio.wav",
+            ref_text="Reference text",
+            language="en",
+            apply_pause_between_files=True,
+            pause_between_files_ms=300,
+        )
+        result = generate_voice_clone_queue(
+            model=model,
+            request=request,
+            generation_config=None,
+        )
+        self.assertIsNotNone(result.merged_wav_path)
+        self.assertTrue(Path(result.merged_wav_path).exists())
+        self.assertIn("merged", Path(result.merged_wav_path).name)
+
+        # Verify merged file is readable
+        data, sr = sf.read(result.merged_wav_path, dtype="float32")
+        self.assertEqual(sr, model.sampling_rate)
+        self.assertGreater(len(data), 0)
+
+    def test_merged_wav_matches_sample_rate(self):
+        model = FakeModel()
+        request = VoiceCloneQueueRequest(
+            items=[QueuedCloneItem(text="Test")],
+            ref_audio="audio.wav",
+            ref_text="Reference text",
+            language="en",
+        )
+        result = generate_voice_clone_queue(
+            model=model,
+            request=request,
+            generation_config=None,
+        )
+        data, sr = sf.read(result.merged_wav_path, dtype="float32")
+        self.assertEqual(sr, model.sampling_rate)
+
+    def test_merged_wav_length_with_pause(self):
+        model = FakeModel()
+        request = VoiceCloneQueueRequest(
+            items=[
+                QueuedCloneItem(text="First"),
+                QueuedCloneItem(text="Second"),
+                QueuedCloneItem(text="Third"),
+            ],
+            ref_audio="audio.wav",
+            ref_text="Reference text",
+            language="en",
+            apply_pause_between_files=True,
+            pause_between_files_ms=300,
+        )
+        result = generate_voice_clone_queue(
+            model=model,
+            request=request,
+            generation_config=None,
+        )
+
+        # FakeModel generates arrays where length = len(generate_calls)
+        # First call: generate_calls becomes [call1], len=1, length=1+1=2
+        # Call 2: generate_calls becomes [call1,call2], len=2, length=2+1=3
+        # Call 3: generate_calls becomes [call1,call2,call3], len=3, length=3+1=4
+        # So actual audio samples: 2 + 3 + 4 = 9
+        data, sr = sf.read(result.merged_wav_path, dtype="float32")
+        expected_audio_samples = 2 + 3 + 4
+        expected_pause_samples = 2 * int(sr * 300 / 1000.0)  # 2 pauses between 3 items
+        expected_total = expected_audio_samples + expected_pause_samples
+        self.assertEqual(len(data), expected_total)
+
+    def test_merged_wav_single_item_no_pause(self):
+        model = FakeModel()
+        request = VoiceCloneQueueRequest(
+            items=[QueuedCloneItem(text="Only one")],
+            ref_audio="audio.wav",
+            ref_text="Reference text",
+            language="en",
+            apply_pause_between_files=True,
+            pause_between_files_ms=300,
+        )
+        result = generate_voice_clone_queue(
+            model=model,
+            request=request,
+            generation_config=None,
+        )
+
+        # Single item should have no pause, just the audio
+        data, sr = sf.read(result.merged_wav_path, dtype="float32")
+        # First call: len(generate_calls)=1, length=2
+        self.assertEqual(len(data), 2)
+
+    def test_merged_wav_pause_disabled(self):
+        model = FakeModel()
+        request = VoiceCloneQueueRequest(
+            items=[
+                QueuedCloneItem(text="First"),
+                QueuedCloneItem(text="Second"),
+            ],
+            ref_audio="audio.wav",
+            ref_text="Reference text",
+            language="en",
+            apply_pause_between_files=False,
+            pause_between_files_ms=300,
+        )
+        result = generate_voice_clone_queue(
+            model=model,
+            request=request,
+            generation_config=None,
+        )
+
+        # With pause disabled, merged length should be just sum of audio
+        data, sr = sf.read(result.merged_wav_path, dtype="float32")
+        # First call: length=2, second call: length=3
+        expected_audio_samples = 2 + 3
+        self.assertEqual(len(data), expected_audio_samples)
+
+    def test_invalid_pause_validation_negative(self):
+        with self.assertRaises(VoiceCloneQueueError) as ctx:
+            request = VoiceCloneQueueRequest(
+                items=[QueuedCloneItem(text="Test")],
+                ref_audio="audio.wav",
+                ref_text="Reference text",
+                language="en",
+                apply_pause_between_files=True,
+                pause_between_files_ms=-1,
+            )
+            validate_queue_request(request)
+        self.assertIn("0 and 5000", str(ctx.exception))
+
+    def test_invalid_pause_validation_too_large(self):
+        with self.assertRaises(VoiceCloneQueueError) as ctx:
+            request = VoiceCloneQueueRequest(
+                items=[QueuedCloneItem(text="Test")],
+                ref_audio="audio.wav",
+                ref_text="Reference text",
+                language="en",
+                apply_pause_between_files=True,
+                pause_between_files_ms=5001,
+            )
+            validate_queue_request(request)
+        self.assertIn("0 and 5000", str(ctx.exception))
+
+    def test_pause_validation_skipped_when_disabled(self):
+        # Should not raise even with invalid pause value when apply_pause is False
+        request = VoiceCloneQueueRequest(
+            items=[QueuedCloneItem(text="Test")],
+            ref_audio="audio.wav",
+            ref_text="Reference text",
+            language="en",
+            apply_pause_between_files=False,
+            pause_between_files_ms=9999,
+        )
+        # Should not raise
+        validate_queue_request(request)
+
+    def test_merged_wav_cleanup_on_failure(self):
+        model = FakeModel(fail_on_text="Second")
+        request = VoiceCloneQueueRequest(
+            items=[
+                QueuedCloneItem(text="First"),
+                QueuedCloneItem(text="Second"),
+            ],
+            ref_audio="audio.wav",
+            ref_text="Reference text",
+            language="en",
+        )
+
+        with self.assertRaises(VoiceCloneQueueGenerationError):
+            generate_voice_clone_queue(
+                model=model,
+                request=request,
+                generation_config=None,
+            )
+
     def test_normalize_queue_rows_accepts_dataframe_and_drops_empty_rows(self):
         df = FakeDataFrame([
             {"text": "First line"},
