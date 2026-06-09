@@ -658,6 +658,8 @@ def build_demo(
     .gradio-container .prose {font-size: 1.1em !important;}
     .compact-audio audio {height: 60px !important;}
     .compact-audio .waveform {min-height: 80px !important;}
+    #queue-items-table .table-wrap {max-height: 420px !important; overflow-y: auto !important;}
+    #queue-items-table textarea {max-height: 160px !important; overflow-y: auto !important;}
     """
 
     # Reusable: language dropdown component
@@ -871,6 +873,10 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                             row_count=(5, "dynamic"),
                             col_count=(1, "fixed"),
                             label="Queue Items",
+                            wrap=True,
+                            max_height=420,
+                            column_widths=["100%"],
+                            elem_id="queue-items-table",
                         )
                         
                         with gr.Row():
