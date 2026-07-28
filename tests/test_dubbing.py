@@ -339,6 +339,53 @@ class TestDubbingRequest(unittest.TestCase):
         self.assertEqual(req.guidance_scale, 2.0)
         self.assertTrue(req.denoise)
         self.assertTrue(req.postprocess_output)
+        self.assertFalse(req.single_speaker)
+        self.assertFalse(req.skip_alignment_check)
+        self.assertFalse(req.use_demucs)
+        self.assertEqual(req.demucs_model, "htdemucs_ft")
+        self.assertIsNone(req.demucs_device)
+
+    def test_single_speaker_mode(self):
+        req = DubbingRequest(
+            mp3_path="test.mp3",
+            original_srt_path="orig.srt",
+            translated_srt_path="trans.srt",
+            language="en",
+            single_speaker=True,
+        )
+        self.assertTrue(req.single_speaker)
+
+    def test_skip_alignment_mode(self):
+        req = DubbingRequest(
+            mp3_path="test.mp3",
+            original_srt_path="orig.srt",
+            translated_srt_path="trans.srt",
+            language="en",
+            skip_alignment_check=True,
+        )
+        self.assertTrue(req.skip_alignment_check)
+
+    def test_demucs_mode(self):
+        req = DubbingRequest(
+            mp3_path="test.mp3",
+            original_srt_path="orig.srt",
+            translated_srt_path="trans.srt",
+            language="en",
+            use_demucs=True,
+        )
+        self.assertTrue(req.use_demucs)
+
+    def test_demucs_model_custom(self):
+        req = DubbingRequest(
+            mp3_path="test.mp3",
+            original_srt_path="orig.srt",
+            translated_srt_path="trans.srt",
+            language="en",
+            use_demucs=True,
+            demucs_model="htdemucs",
+        )
+        self.assertTrue(req.use_demucs)
+        self.assertEqual(req.demucs_model, "htdemucs")
 
 
 class TestDubbingResult(unittest.TestCase):

@@ -29,7 +29,7 @@ import torchaudio
 from pydub import AudioSegment
 
 from omnivoice.models.omnivoice import OmniVoice
-from omnivoice.utils.audio import concatenate_audio_with_silence, remove_silence
+from omnivoice.utils.audio import remove_silence
 from omnivoice.utils.common import get_best_device
 
 logger = logging.getLogger(__name__)
@@ -86,6 +86,11 @@ class DubbingRequest:
     guidance_scale: float = 2.0
     denoise: bool = True
     postprocess_output: bool = True
+    single_speaker: bool = False
+    skip_alignment_check: bool = False
+    use_demucs: bool = False
+    demucs_model: str = "htdemucs_ft"
+    demucs_device: str | None = None
 
 
 @dataclass(frozen=True)
@@ -338,36 +343,60 @@ def run_dubbing(
     """Execute a full dubbing pipeline.
 
     Steps:
-    1. Parse and validate both SRT files (1:1 alignment).
+    1. Parse and optionally validate both SRT files.
     2. Load the source MP3.
     3. Load the OmniVoice model.
-    4. For each SRT entry pair:
+    4. If *single_speaker*, clone the best segment once and reuse.
+       Otherwise, clone each segment independently.
+    5. For each SRT entry pair:
        - Non-speech entries: preserve original audio.
        - Short segments: fall back to nearest long segment for voice cloning.
        - Voice clone from source audio, synthesize translated text.
        - Apply speed control to fit original timing (speed ≥ 1.0).
        - Retry up to *max_retries* times on failure.
-    5. Concatenate all segments into a single WAV.
-    6. Save and return the result.
+    6. Concatenate all segments into a single WAV.
+    7. Save and return the result.
 
     Args:
         request: Full dubbing configuration.
         progress_callback: Optional ``(fraction, message)`` callback
             for progress reporting (0.0–1.0).
+        model: Optional pre-loaded OmniVoice model (Web UI use).
 
     Returns:
         A :class:`DubbingResult` with output path and statistics.
 
     Raises:
         FileNotFoundError: If any input file is missing.
-        SrtAlignmentError: If SRTs are not 1:1 aligned.
+        SrtAlignmentError: If SRTs are not 1:1 aligned
+            (unless *skip_alignment_check* is set).
     """
     _report_progress(progress_callback, 0.0, "Parsing SRT files…")
 
     # ── 1. Parse SRTs ──────────────────────────────────────────────
     original_entries = parse_srt(request.original_srt_path)
     translated_entries = parse_srt(request.translated_srt_path)
-    validate_srt_alignment(original_entries, translated_entries)
+
+    if request.skip_alignment_check:
+        # Best-effort: pair by index, truncate to shorter list, warn on mismatch
+        if len(original_entries) != len(translated_entries):
+            logger.warning(
+                "SRT count mismatch: original=%d, translated=%d. "
+                "Using min length for pairing.",
+                len(original_entries),
+                len(translated_entries),
+            )
+            min_len = min(len(original_entries), len(translated_entries))
+            original_entries = original_entries[:min_len]
+            translated_entries = translated_entries[:min_len]
+        else:
+            # Check alignment but only warn
+            try:
+                validate_srt_alignment(original_entries, translated_entries)
+            except SrtAlignmentError as e:
+                logger.warning("SRT alignment issue (continuing anyway): %s", e)
+    else:
+        validate_srt_alignment(original_entries, translated_entries)
 
     total = len(original_entries)
     if total == 0:
@@ -383,6 +412,54 @@ def run_dubbing(
 
     _report_progress(progress_callback, 0.10, "Source audio loaded")
 
+    # ── 2.5 Demucs vocal separation (optional) ─────────────────────
+    if request.use_demucs:
+        _report_progress(progress_callback, 0.10, "Separating vocals with Demucs…")
+        try:
+            import demucs.api  # noqa: F811
+        except ImportError:
+            raise ImportError(
+                "Demucs is not installed. Install it with:\n"
+                "  pip install demucs\n"
+                "or:\n"
+                "  pip install omnivoice[demucs]"
+            ) from None
+
+        demucs_device = request.demucs_device or request.device or get_best_device()
+        logger.info(
+            "Initializing Demucs separator (model=%s, device=%s)…",
+            request.demucs_model,
+            demucs_device,
+        )
+        separator = demucs.api.Separator(
+            model=request.demucs_model,
+            device=demucs_device,
+            progress=True,
+        )
+        _origin, separated = separator.separate_audio_file(str(mp3_path))
+        vocals: torch.Tensor = separated["vocals"]  # (channels, samples), sr=44100
+
+        # Convert vocals tensor to pydub AudioSegment
+        vocals_np = vocals.cpu().numpy()  # (channels, samples), float32
+        if vocals_np.shape[0] == 1:
+            samples_int16 = (vocals_np[0] * 32767).clip(-32768, 32767).astype(np.int16)
+        else:
+            samples_int16 = (vocals_np.mean(axis=0) * 32767).clip(-32768, 32767).astype(np.int16)
+
+        vocals_segment = AudioSegment(
+            samples_int16.tobytes(),
+            frame_rate=44100,
+            sample_width=2,
+            channels=1,
+        )
+
+        if vocals_segment.frame_rate != mp3_sample_rate:
+            vocals_segment = vocals_segment.set_frame_rate(mp3_sample_rate)
+
+        full_audio = vocals_segment
+        logger.info("Demucs vocal separation complete — using vocals-only audio")
+        _report_progress(progress_callback, 0.12, "Vocal separation complete")
+
     # ── 3. Load model ─────────────────────────────────────────────
     _report_progress(progress_callback, 0.12, "Loading OmniVoice model…")
     if model is None:
@@ -393,8 +470,50 @@ def run_dubbing(
         )
     _report_progress(progress_callback, 0.15, "Model loaded")
 
-    # ── 4. Process segments ───────────────────────────────────────
+    # ── Work directory ─────────────────────────────────────────────
     work_dir = Path(mkdtemp(prefix="omnivoice_dub_"))
+
+    # ── 3.5 Single-speaker: pre-clone best voice once ──────────────
+    shared_voice_clone_prompt = None
+    if request.single_speaker:
+        _report_progress(progress_callback, 0.17, "Single-speaker mode: finding best voice…")
+        # Find the longest non-non-speech segment for voice cloning
+        best_entry = None
+        best_duration = 0.0
+        for entry in original_entries:
+            if is_non_speech(entry.text):
+                continue
+            dur = entry.end_sec - entry.start_sec
+            if dur > best_duration:
+                best_duration = dur
+                best_entry = entry
+
+        if best_entry is None:
+            raise DubbingError(
+                "Single-speaker mode: no speech segments found in SRT"
+            )
+
+        logger.info(
+            "Single-speaker: cloning entry %d (%.1fs) as shared voice",
+            best_entry.index,
+            best_duration,
+        )
+        # Extract and prepare reference audio
+        source_seg = _extract_audio_segment(
+            full_audio, best_entry, request.padding_ms
+        )
+        source_data = _audiosegment_to_numpy_mono(source_seg)
+        source_data = _trim_silence_numpy(source_data, source_seg.frame_rate)
+        best_ref_path = work_dir / "shared_ref.wav"
+        sf.write(str(best_ref_path), source_data, source_seg.frame_rate)
+
+        shared_voice_clone_prompt = model.create_voice_clone_prompt(
+            ref_audio=str(best_ref_path),
+            ref_text=best_entry.text,
+        )
+        _report_progress(progress_callback, 0.20, "Shared voice cloned — reusing for all segments")
+
+    # ── 4. Process segments ───────────────────────────────────────
     dubbed_audio_chunks: list[np.ndarray] = []
     failed_indices: list[int] = []
     segment_metadata: list[dict[str, Any]] = []
@@ -405,6 +524,13 @@ def run_dubbing(
         "denoise": request.denoise,
         "postprocess_output": request.postprocess_output,
     }
+
+    if request.use_demucs and gen_kwargs["denoise"]:
+        logger.warning(
+            "Demucs is active — forcing denoise=False "
+            "(vocal separation makes denoising unnecessary)"
+        )
+        gen_kwargs["denoise"] = False
 
     for i, (orig_entry, trans_entry) in enumerate(
         zip(original_entries, translated_entries)
@@ -422,56 +548,74 @@ def run_dubbing(
                 seg = _extract_audio_segment(full_audio, orig_entry, request.padding_ms)
                 audio_np = _audiosegment_to_numpy_mono(seg)
                 audio_np = _resample_to_output_rate(audio_np, seg.frame_rate)
+                # Trim/pad to exactly original_duration — removes ±padding
+                target_samples = int(original_duration * OUTPUT_SAMPLE_RATE)
+                if len(audio_np) > target_samples:
+                    audio_np = audio_np[:target_samples]
+                elif len(audio_np) < target_samples:
+                    audio_np = np.concatenate(
+                        [
+                            audio_np,
+                            np.zeros(target_samples - len(audio_np), dtype=np.float32),
+                        ]
+                    )
                 dubbed_audio_chunks.append(audio_np)
                 segment_metadata.append(
                     {"index": i, "type": "non_speech", "original_text": orig_entry.text}
                 )
                 continue
 
-            # ── Extract source audio for voice cloning ────────────
-            source_segment = _extract_audio_segment(
-                full_audio, orig_entry, request.padding_ms
-            )
-            source_data = _audiosegment_to_numpy_mono(source_segment)
-            source_data = _trim_silence_numpy(source_data, source_segment.frame_rate)
-
-            # Determine which entry to use for voice cloning
-            clone_entry = orig_entry
-            seg_duration = (
-                orig_entry.end_sec - orig_entry.start_sec
-            ) + (request.padding_ms * 2 / 1000.0)
-
-            if seg_duration < request.short_segment_threshold_s:
-                fallback = find_fallback_entry(
-                    original_entries, i, request.short_segment_threshold_s
+            # ── Prepare voice clone parameters ──────────────────
+            if shared_voice_clone_prompt is not None:
+                # Single-speaker mode: reuse pre-computed voice
+                gen_kwargs_seg = dict(gen_kwargs)
+                gen_kwargs_seg["voice_clone_prompt"] = shared_voice_clone_prompt
+            else:
+                # Multi-speaker mode: extract audio + clone per segment
+                source_segment = _extract_audio_segment(
+                    full_audio, orig_entry, request.padding_ms
                 )
-                if fallback is not None:
-                    clone_entry = fallback
-                    fallback_seg = _extract_audio_segment(
-                        full_audio, fallback, request.padding_ms
-                    )
-                    fallback_data = _audiosegment_to_numpy_mono(fallback_seg)
-                    source_data = _trim_silence_numpy(
-                        fallback_data, fallback_seg.frame_rate
-                    )
-                    logger.debug(
-                        "Segment %d too short (%.1fs), using fallback entry %d",
-                        i,
-                        seg_duration,
-                        fallback.index,
-                    )
-                else:
-                    logger.warning(
-                        "Segment %d too short (%.1fs) and no fallback found",
-                        i,
-                        seg_duration,
-                    )
+                source_data = _audiosegment_to_numpy_mono(source_segment)
+                source_data = _trim_silence_numpy(source_data, source_segment.frame_rate)
 
-            # Save reference audio to temp file for the model
-            ref_path = work_dir / f"ref_{i:04d}.wav"
-            sf.write(str(ref_path), source_data, source_segment.frame_rate)
+                # Determine which entry to use for voice cloning
+                clone_entry = orig_entry
+                seg_duration = (
+                    orig_entry.end_sec - orig_entry.start_sec
+                ) + (request.padding_ms * 2 / 1000.0)
 
-            # ── Voice clone + synthesize (with retry + speed control) ─
+                if seg_duration < request.short_segment_threshold_s:
+                    fallback = find_fallback_entry(
+                        original_entries, i, request.short_segment_threshold_s
+                    )
+                    if fallback is not None:
+                        clone_entry = fallback
+                        fallback_seg = _extract_audio_segment(
+                            full_audio, fallback, request.padding_ms
+                        )
+                        fallback_data = _audiosegment_to_numpy_mono(fallback_seg)
+                        source_data = _trim_silence_numpy(
+                            fallback_data, fallback_seg.frame_rate
+                        )
+                        logger.debug(
+                            "Segment %d too short (%.1fs), using fallback entry %d",
+                            i, seg_duration, fallback.index,
+                        )
+                    else:
+                        logger.warning(
+                            "Segment %d too short (%.1fs) and no fallback found",
+                            i, seg_duration,
+                        )
+
+                # Save reference audio to temp file for the model
+                ref_path = work_dir / f"ref_{i:04d}.wav"
+                sf.write(str(ref_path), source_data, source_segment.frame_rate)
+
+                gen_kwargs_seg = dict(gen_kwargs)
+                gen_kwargs_seg["ref_text"] = clone_entry.text
+                gen_kwargs_seg["ref_audio"] = str(ref_path)
+
+            # ── Voice synthesize (with retry + speed control) ─────
             dubbed_audio: np.ndarray | None = None
             current_speed: float = 1.0
             last_error: str = ""
@@ -481,10 +625,8 @@ def run_dubbing(
                     audios = model.generate(
                         text=trans_entry.text,
                         language=request.language,
-                        ref_text=clone_entry.text,
-                        ref_audio=str(ref_path),
                         speed=current_speed,
-                        **gen_kwargs,
+                        **gen_kwargs_seg,
                     )
                     dubbed_audio = audios[0]
                     output_duration = len(dubbed_audio) / OUTPUT_SAMPLE_RATE
@@ -506,15 +648,28 @@ def run_dubbing(
                             audios = model.generate(
                                 text=trans_entry.text,
                                 language=request.language,
-                                ref_text=clone_entry.text,
-                                ref_audio=str(ref_path),
                                 speed=current_speed,
-                                **gen_kwargs,
+                                **gen_kwargs_seg,
                             )
                             dubbed_audio = audios[0]
                             output_duration = len(dubbed_audio) / OUTPUT_SAMPLE_RATE
+                            # Cap: if output at max_speed still exceeds timeslot, truncate
+                            if output_duration > original_duration:
+                                logger.warning(
+                                    "Segment %d at max speed %.1fx still %.2fs > "
+                                    "original %.2fs; truncating to fit timeslot",
+                                    i,
+                                    current_speed,
+                                    output_duration,
+                                    original_duration,
+                                )
+                                max_samples = int(
+                                    original_duration * OUTPUT_SAMPLE_RATE
+                                )
+                                dubbed_audio = dubbed_audio[:max_samples]
+                                output_duration = len(dubbed_audio) / OUTPUT_SAMPLE_RATE
 
-                    break  # success
+                    break  # success (fits within timeslot, possibly truncated)
 
                 except Exception as exc:
                     last_error = str(exc)
@@ -579,8 +734,34 @@ def run_dubbing(
     if not dubbed_audio_chunks:
         raise DubbingError("No audio segments were generated")
 
-    merged = concatenate_audio_with_silence(
-        dubbed_audio_chunks, OUTPUT_SAMPLE_RATE, silence_duration=0.0
+    # Build merged audio with inter-segment timing gaps filled by silence.
+    # Each chunk already matches its original segment duration (fixes Bug 1 & 2).
+    # Insert silence for gaps between consecutive SRT entries and prepend initial
+    # offset so the merged output aligns with video timestamps starting from t=0.
+    merged_parts: list[np.ndarray] = []
+
+    # Prepend silence for offset before the first segment
+    if original_entries[0].start_sec > 0:
+        initial_offset_samples = int(original_entries[0].start_sec * OUTPUT_SAMPLE_RATE)
+        merged_parts.append(np.zeros(initial_offset_samples, dtype=np.float32))
+
+    for i, chunk in enumerate(dubbed_audio_chunks):
+        merged_parts.append(chunk)
+        if i < len(dubbed_audio_chunks) - 1:
+            gap = original_entries[i + 1].start_sec - original_entries[i].end_sec
+            if gap > 0:
+                gap_samples = int(gap * OUTPUT_SAMPLE_RATE)
+                merged_parts.append(np.zeros(gap_samples, dtype=np.float32))
+            elif gap < -0.01:
+                logger.debug(
+                    "Segments %d and %d overlap by %.2fs; no silence inserted",
+                    i, i + 1, -gap,
+                )
+
+    merged = (
+        np.concatenate(merged_parts)
+        if merged_parts
+        else np.array([], dtype=np.float32)
     )
 
     # ── 6. Write output ───────────────────────────────────────────
@@ -712,6 +893,42 @@ def get_parser() -> argparse.ArgumentParser:
         help="Maximum retry attempts per failed segment.",
     )
 
+    # Operating modes
+    parser.add_argument(
+        "--single-speaker",
+        action="store_true",
+        dest="single_speaker",
+        help="Single-speaker mode: clone the best voice once and reuse for all "
+        "segments. Much faster than multi-speaker mode.",
+    )
+    parser.add_argument(
+        "--skip-alignment-check",
+        action="store_true",
+        dest="skip_alignment_check",
+        help="Skip strict SRT alignment validation. Use when SRT files have "
+        "minor timestamp mismatches. Pairs entries by index with warning.",
+    )
+
+    # Demucs vocal separation
+    parser.add_argument(
+        "--demucs",
+        action="store_true",
+        default=False,
+        help="Apply Demucs vocal separation to the source MP3 before dubbing.",
+    )
+    parser.add_argument(
+        "--demucs-model",
+        type=str,
+        default="htdemucs_ft",
+        help="Demucs model variant (default: htdemucs_ft).",
+    )
+    parser.add_argument(
+        "--demucs-device",
+        type=str,
+        default=None,
+        help="Device for Demucs (default: auto-detect, same as --device).",
+    )
+
     # Generation parameters (passed through to OmniVoice)
     parser.add_argument("--num-step", type=int, default=32)
     parser.add_argument("--guidance-scale", type=float, default=2.0)
@@ -754,6 +971,11 @@ def main() -> None:
         guidance_scale=args.guidance_scale,
         denoise=args.denoise,
         postprocess_output=args.postprocess_output,
+        single_speaker=args.single_speaker,
+        skip_alignment_check=args.skip_alignment_check,
+        use_demucs=args.demucs,
+        demucs_model=args.demucs_model,
+        demucs_device=args.demucs_device,
     )
 
     logger.info("Starting dubbing pipeline…")

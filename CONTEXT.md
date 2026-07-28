@@ -33,11 +33,15 @@ An ordered set of Queued Clone Items generated as separate audio files using the
 _Avoid_: Conversation when the items are independent outputs
 
 **Dubbing Project**:
-A complete dubbing pipeline that takes a source MP3, an original SRT, and a translated SRT, and produces a final dubbed WAV by cloning each speaker's voice from the original audio and synthesizing the translated text.
+A complete dubbing pipeline that takes a source MP3, an original SRT, and a translated SRT, and produces a final dubbed WAV by cloning each speaker's voice from the original audio and synthesizing the translated text. The source MP3 is pre-processed through Demucs vocal separation to extract only the speech before voice cloning.
 _Avoid_: Auto-dub, video dub, SRT voice clone
 
+**Vocals-Separated Audio**:
+The output of the Demucs source separation model applied to the source MP3 before dubbing. Contains only the `vocals` stem — all music, sound effects, and background noise are removed. This is the audio source from which all Source Segments are extracted.
+_Avoid_: Clean audio, denoised audio — those imply speech enhancement, not source separation
+
 **Source Segment**:
-One audio slice extracted from the source MP3 using the timestamp of a single SRT line, padded ±200ms and trimmed of silence. Used as the reference audio for cloning the speaker's voice in that segment.
+One audio slice extracted from the Vocals-Separated Audio using the timestamp of a single SRT line, padded ±200ms and trimmed of silence. Used as the reference audio for cloning the speaker's voice in that segment.
 _Avoid_: Reference audio when referring to timestamp-bound extraction
 
 **Dubbed Segment**:

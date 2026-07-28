@@ -1203,6 +1203,19 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                             interactive=True,
                             info="Select the language of the translated SRT.",
                         )
+                        dub_single_speaker = gr.Radio(
+                            label="Speaker Mode / 说话人模式",
+                            choices=["Multi-speaker", "Single-speaker"],
+                            value="Multi-speaker",
+                            info="Multi-speaker: clone each segment's voice individually. "
+                            "Single-speaker: clone best voice once, reuse for all (faster).",
+                        )
+                        dub_skip_alignment = gr.Checkbox(
+                            label="Skip alignment check / 跳过对齐检查",
+                            value=False,
+                            info="Skip strict SRT alignment validation. "
+                            "Use when SRT files have timestamp mismatches.",
+                        )
                         with gr.Accordion("Advanced Settings", open=False):
                             dub_padding = gr.Number(
                                 label="Padding (ms) / 填充(毫秒)",
@@ -1263,6 +1276,8 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                     srt_orig,
                     srt_trans,
                     lang,
+                    single_speaker,
+                    skip_alignment,
                     padding,
                     short_threshold,
                     max_speed,
@@ -1287,6 +1302,8 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                         original_srt_path=srt_orig,
                         translated_srt_path=srt_trans,
                         language=lang,
+                        single_speaker=(single_speaker == "Single-speaker"),
+                        skip_alignment_check=bool(skip_alignment),
                         padding_ms=int(padding or 200),
                         short_segment_threshold_s=float(
                             short_threshold or 1.5
@@ -1340,6 +1357,8 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                         dub_srt_original,
                         dub_srt_translated,
                         dub_lang,
+                        dub_single_speaker,
+                        dub_skip_alignment,
                         dub_padding,
                         dub_short_threshold,
                         dub_max_speed,
