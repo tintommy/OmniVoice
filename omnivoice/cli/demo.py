@@ -1216,6 +1216,19 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                             info="Skip strict SRT alignment validation. "
                             "Use when SRT files have timestamp mismatches.",
                         )
+                        dub_demucs = gr.Checkbox(
+                            label="Use Demucs vocal separation (separate vocals from music)",
+                            value=False,
+                            info="Extract vocals from MP3 using Demucs before dubbing. "
+                            "Improves quality for videos with background music.",
+                        )
+                        dub_demucs_model = gr.Dropdown(
+                            label="Demucs model",
+                            choices=["htdemucs_ft", "htdemucs", "mdx_extra"],
+                            value="htdemucs_ft",
+                            info="htdemucs_ft: best quality (default). "
+                            "htdemucs: faster. mdx_extra: alternative.",
+                        )
                         with gr.Accordion("Advanced Settings", open=False):
                             dub_padding = gr.Number(
                                 label="Padding (ms) / 填充(毫秒)",
@@ -1278,6 +1291,8 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                     lang,
                     single_speaker,
                     skip_alignment,
+                    demucs_enabled,
+                    demucs_model,
                     padding,
                     short_threshold,
                     max_speed,
@@ -1304,6 +1319,8 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                         language=lang,
                         single_speaker=(single_speaker == "Single-speaker"),
                         skip_alignment_check=bool(skip_alignment),
+                        use_demucs=bool(demucs_enabled),
+                        demucs_model=str(demucs_model or "htdemucs_ft"),
                         padding_ms=int(padding or 200),
                         short_segment_threshold_s=float(
                             short_threshold or 1.5
@@ -1359,6 +1376,8 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                         dub_lang,
                         dub_single_speaker,
                         dub_skip_alignment,
+                        dub_demucs,
+                        dub_demucs_model,
                         dub_padding,
                         dub_short_threshold,
                         dub_max_speed,
