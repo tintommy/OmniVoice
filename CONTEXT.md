@@ -31,3 +31,23 @@ _Avoid_: Dialogue Line when the text is not part of a conversation
 **Voice Clone Queue**:
 An ordered set of Queued Clone Items generated as separate audio files using the same selected Voice Profile.
 _Avoid_: Conversation when the items are independent outputs
+
+**Dubbing Project**:
+A complete dubbing pipeline that takes a source MP3, an original SRT, and a translated SRT, and produces a final dubbed WAV by cloning each speaker's voice from the original audio and synthesizing the translated text.
+_Avoid_: Auto-dub, video dub, SRT voice clone
+
+**Source Segment**:
+One audio slice extracted from the source MP3 using the timestamp of a single SRT line, padded ±200ms and trimmed of silence. Used as the reference audio for cloning the speaker's voice in that segment.
+_Avoid_: Reference audio when referring to timestamp-bound extraction
+
+**Dubbed Segment**:
+The synthesized audio output for one translated SRT line, spoken in the voice cloned from the corresponding Source Segment. Timing is adjusted via speed control to fit within the original segment's duration.
+_Avoid_: Dialogue Line, Queued Clone Item — those belong to different workflows
+
+**Dubbed Audio**:
+The final merged WAV file formed by concatenating all Dubbed Segments and preserved non-speech segments in original SRT order, with timing aligned to the source video.
+_Avoid_: Conversation Audio, Merged Queue Audio — those are different workflows
+
+**Non-Speech Segment**:
+An SRT line whose content is not spoken dialogue (e.g. `[music]`, `(applause)`). Detected by bracket/parenthesis patterns. The original audio is preserved as-is rather than voice-cloned.
+_Avoid_: Source Segment when the content is non-speech

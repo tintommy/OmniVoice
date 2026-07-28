@@ -60,6 +60,13 @@ from omnivoice.cli.voice_clone_queue import (
     validate_queue_request,
 )
 
+from omnivoice.cli.dubbing import (
+    DubbingError,
+    DubbingRequest,
+    DubbingResult,
+    run_dubbing,
+)
+
 QUEUE_AVAILABLE = True
 
 
@@ -1162,6 +1169,187 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                     _export_dialogue_csv,
                     inputs=cvc_dialogue_df,
                     outputs=[cvc_export_file, cvc_status],
+                )
+
+            # ==============================================================
+            # Dubbing
+            # ==============================================================
+            with gr.TabItem("Dubbing"):
+                gr.Markdown(
+                    "Upload a source MP3, original SRT, and translated SRT "
+                    "(1:1 aligned) to auto-dub the video."
+                )
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        dub_mp3 = gr.Audio(
+                            label="Source MP3 / 源音频",
+                            type="filepath",
+                        )
+                        dub_srt_original = gr.File(
+                            label="Original SRT / 原始字幕",
+                            file_types=[".srt"],
+                            type="filepath",
+                        )
+                        dub_srt_translated = gr.File(
+                            label="Translated SRT / 翻译字幕",
+                            file_types=[".srt"],
+                            type="filepath",
+                        )
+                        dub_lang = gr.Dropdown(
+                            label="Target Language / 目标语言",
+                            choices=_conversation_language_choices(),
+                            value="English",
+                            allow_custom_value=True,
+                            interactive=True,
+                            info="Select the language of the translated SRT.",
+                        )
+                        with gr.Accordion("Advanced Settings", open=False):
+                            dub_padding = gr.Number(
+                                label="Padding (ms) / 填充(毫秒)",
+                                value=200,
+                                minimum=0,
+                                maximum=2000,
+                                step=50,
+                            )
+                            dub_short_threshold = gr.Number(
+                                label="Short Segment Threshold (s) / 短片段阈值(秒)",
+                                value=1.5,
+                                minimum=0.5,
+                                maximum=10.0,
+                                step=0.1,
+                            )
+                            dub_max_speed = gr.Number(
+                                label="Max Speed / 最大速度",
+                                value=3.0,
+                                minimum=1.0,
+                                maximum=5.0,
+                                step=0.1,
+                            )
+                            dub_max_retries = gr.Number(
+                                label="Max Retries / 最大重试",
+                                value=2,
+                                minimum=0,
+                                maximum=5,
+                                step=1,
+                            )
+                            (
+                                dub_ns,
+                                dub_gs,
+                                dub_dn,
+                                _dub_sp,
+                                _dub_du,
+                                dub_pp,
+                                _dub_po,
+                            ) = _gen_settings()
+                        dub_btn = gr.Button(
+                            "Generate Dubbed Audio / 生成配音",
+                            variant="primary",
+                        )
+                    with gr.Column(scale=1):
+                        dub_audio = gr.Audio(
+                            label="Dubbed Audio / 配音结果",
+                            type="numpy",
+                        )
+                        dub_download = gr.File(
+                            label="Download WAV / 下载WAV",
+                        )
+                        dub_status = gr.Textbox(
+                            label="Status / 状态",
+                            lines=3,
+                        )
+
+                def _dub_fn(
+                    mp3,
+                    srt_orig,
+                    srt_trans,
+                    lang,
+                    padding,
+                    short_threshold,
+                    max_speed,
+                    max_retries,
+                    ns,
+                    gs,
+                    dn,
+                    pp,
+                    progress=gr.Progress(),
+                ):
+                    if not mp3:
+                        raise gr.Error("Please upload the source MP3 file.")
+                    if not srt_orig:
+                        raise gr.Error("Please upload the original SRT file.")
+                    if not srt_trans:
+                        raise gr.Error("Please upload the translated SRT file.")
+                    if not lang:
+                        raise gr.Error("Please select a target language.")
+
+                    request = DubbingRequest(
+                        mp3_path=mp3,
+                        original_srt_path=srt_orig,
+                        translated_srt_path=srt_trans,
+                        language=lang,
+                        padding_ms=int(padding or 200),
+                        short_segment_threshold_s=float(
+                            short_threshold or 1.5
+                        ),
+                        max_speed=float(max_speed or 3.0),
+                        max_retries=int(max_retries or 2),
+                        num_step=int(ns or 32),
+                        guidance_scale=float(gs or 2.0),
+                        denoise=bool(dn),
+                        postprocess_output=bool(pp),
+                    )
+
+                    def _progress(fraction: float, message: str):
+                        progress(fraction, desc=message)
+
+                    try:
+                        result = run_dubbing(
+                            request,
+                            progress_callback=_progress,
+                            model=model,
+                        )
+                    except Exception as e:
+                        raise gr.Error(f"Dubbing failed: {e}")
+
+                    status_parts = [
+                        f"Total segments: {result.total_segments}",
+                        f"Successful: {result.successful_segments}",
+                    ]
+                    if result.failed_indices:
+                        status_parts.append(
+                            f"Failed: {', '.join(str(i) for i in result.failed_indices)}"
+                        )
+                    else:
+                        status_parts.append("All segments generated successfully.")
+
+                    import soundfile as sf
+
+                    audio_data, sr = sf.read(result.wav_path, dtype="float32")
+                    waveform = (audio_data * 32767).astype(np.int16)
+
+                    return (
+                        (sr, waveform),
+                        result.wav_path,
+                        "\n".join(status_parts),
+                    )
+
+                dub_btn.click(
+                    _dub_fn,
+                    inputs=[
+                        dub_mp3,
+                        dub_srt_original,
+                        dub_srt_translated,
+                        dub_lang,
+                        dub_padding,
+                        dub_short_threshold,
+                        dub_max_speed,
+                        dub_max_retries,
+                        dub_ns,
+                        dub_gs,
+                        dub_dn,
+                        dub_pp,
+                    ],
+                    outputs=[dub_audio, dub_download, dub_status],
                 )
 
             # ==============================================================
