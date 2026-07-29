@@ -1406,7 +1406,7 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                             for vt, count in merged
                         ],
                         "total_windows": total_windows,
-                        "segment_voice_map": segment_map,
+                        "segment_voice_map": {str(k): v for k, v in segment_map.items()},
                     }
 
                     # Status text
