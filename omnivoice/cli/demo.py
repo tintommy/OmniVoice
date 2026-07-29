@@ -67,6 +67,13 @@ from omnivoice.cli.dubbing import (
     run_dubbing,
 )
 
+from omnivoice.speaker import (
+    ALL_VOICE_TYPES,
+    analyze_speakers,
+    build_segment_voice_map,
+    merge_voice_types,
+)
+
 QUEUE_AVAILABLE = True
 
 
@@ -1181,6 +1188,8 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                 )
                 with gr.Row():
                     with gr.Column(scale=1):
+                        # ── Section 1: Analyze Speakers ────────────────────────
+                        gr.Markdown("### Section 1: Analyze Speakers / 分析说话人")
                         dub_mp3 = gr.Audio(
                             label="Source MP3 / 源音频",
                             type="filepath",
@@ -1190,6 +1199,62 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                             file_types=[".srt"],
                             type="filepath",
                         )
+                        dub_api_key = gr.Textbox(
+                            label="Gemini API Key / Gemini API 密钥",
+                            type="password",
+                            placeholder="Enter your Gemini API key",
+                            info="Required for speaker analysis. Get one at https://aistudio.google.com/apikey",
+                        )
+                        dub_analyze_btn = gr.Button(
+                            "Analyze Speakers / 分析说话人",
+                            variant="secondary",
+                        )
+                        dub_analysis_status = gr.Textbox(
+                            label="Analysis Status / 分析状态",
+                            lines=2,
+                            interactive=False,
+                        )
+                        dub_voice_types_json = gr.JSON(
+                            label="Detected Voice Types / 检测到的说话人类型",
+                            visible=False,
+                        )
+
+                        # ── Section 2: Voice Samples ───────────────────────────
+                        gr.Markdown("### Section 2: Voice Samples / 声音样本")
+                        voice_samples_group = gr.Group(visible=False)
+                        with voice_samples_group:
+                            dub_voice_result_md = gr.Markdown("")
+                            dub_voice_rows = []
+                            dub_voice_audios = []
+                            dub_voice_texts = []
+                            for _vt in ALL_VOICE_TYPES:
+                                safe_name = _vt.replace("-", "_")
+                                with gr.Row(visible=False) as row:
+                                    gr.Markdown(f"**{_vt}**", scale=1)
+                                    _audio = gr.Audio(
+                                        label=f"Sample for {_vt} / {_vt} 样本",
+                                        type="filepath",
+                                        scale=2,
+                                    )
+                                    _text = gr.Textbox(
+                                        label=f"Transcript for {_vt} / {_vt} 文本",
+                                        placeholder="What is spoken in the sample / 样本中说的是什么",
+                                        lines=1,
+                                        scale=3,
+                                    )
+                                dub_voice_rows.append(row)
+                                dub_voice_audios.append(_audio)
+                                dub_voice_texts.append(_text)
+                            dub_fallback_checkbox = gr.Checkbox(
+                                label="Use per-segment cloning for voice types without samples / "
+                                "对无样本的说话人类型使用逐段克隆",
+                                value=True,
+                                info="If checked, segments without a voice sample "
+                                "will fall back to original audio cloning.",
+                            )
+
+                        # ── Section 3: Generate Dubbed Audio ───────────────────
+                        gr.Markdown("### Section 3: Generate Dubbed Audio / 生成配音")
                         dub_srt_translated = gr.File(
                             label="Translated SRT / 翻译字幕",
                             file_types=[".srt"],
@@ -1205,10 +1270,15 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                         )
                         dub_single_speaker = gr.Radio(
                             label="Speaker Mode / 说话人模式",
-                            choices=["Multi-speaker", "Single-speaker"],
-                            value="Multi-speaker",
+                            choices=[
+                                "Multi-speaker (per-segment)",
+                                "Single-speaker",
+                                "Voice-map (speaker analysis)",
+                            ],
+                            value="Multi-speaker (per-segment)",
                             info="Multi-speaker: clone each segment's voice individually. "
-                            "Single-speaker: clone best voice once, reuse for all (faster).",
+                            "Single-speaker: clone best voice once, reuse for all (faster). "
+                            "Voice-map: use speaker analysis results with voice samples.",
                         )
                         dub_skip_alignment = gr.Checkbox(
                             label="Skip alignment check / 跳过对齐检查",
@@ -1284,7 +1354,94 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                             lines=3,
                         )
 
-                def _dub_fn(
+                # ── Callback: Analyze Speakers ─────────────────────────────
+                def _analyze_speakers_fn(
+                    mp3,
+                    srt_original,
+                    api_key,
+                    progress=gr.Progress(),
+                ):
+                    if not mp3:
+                        raise gr.Error("Please upload the source MP3 file.")
+                    if not srt_original:
+                        raise gr.Error("Please upload the original SRT file.")
+                    if not api_key:
+                        raise gr.Error("Please provide your Gemini API key.")
+
+                    def _progress(fraction: float, message: str):
+                        progress(fraction, desc=message)
+
+                    try:
+                        results = analyze_speakers(
+                            srt_original,
+                            api_key,
+                            progress_callback=_progress,
+                        )
+                    except ImportError as e:
+                        raise gr.Error(
+                            "google-genai is required for speaker analysis. "
+                            "Install it with: pip install google-genai"
+                        )
+                    except Exception as e:
+                        raise gr.Error(f"Speaker analysis failed: {e}")
+
+                    if not results:
+                        return (
+                            "No results returned from speaker analysis. "
+                            "The SRT file may be empty or unparseable.",
+                            None,
+                            "No voice types detected.",
+                            gr.update(visible=False),
+                            *[gr.update(visible=False) for _ in range(8)],
+                        )
+
+                    merged = merge_voice_types(results)
+                    segment_map = build_segment_voice_map(results)
+                    total_windows = len(results)
+
+                    # Build JSON response
+                    merged_json = {
+                        "voice_types": [
+                            {"label": vt, "count": count}
+                            for vt, count in merged
+                        ],
+                        "total_windows": total_windows,
+                        "segment_voice_map": segment_map,
+                    }
+
+                    # Status text
+                    found_labels = [vt for vt, _ in merged]
+                    status_text = (
+                        f"Analysis complete. Found {len(merged)} voice type(s) "
+                        f"across {total_windows} window(s): "
+                        f"{', '.join(f'{vt} ({n})' for vt, n in merged)}"
+                    )
+
+                    # Result markdown
+                    result_md = (
+                        f"**Found {len(merged)} voice type(s) / "
+                        f"发现 {len(merged)} 种说话人类型:**\n\n"
+                    )
+                    for vt, count in merged:
+                        result_md += f"- **{vt}**: {count} segment(s)\n"
+
+                    # Visibility updates for each row (ordered by ALL_VOICE_TYPES)
+                    found_set = set(found_labels)
+                    visibility_updates = [
+                        gr.update(visible=(vt in found_set))
+                        for vt in ALL_VOICE_TYPES
+                    ]
+
+                    return (
+                        status_text,
+                        merged_json,
+                        result_md,
+                        gr.update(visible=True),
+                        *visibility_updates,
+                    )
+
+                # ── Callback: Generate Dubbed Audio ─────────────────────────
+                def _generate_fn(
                     mp3,
                     srt_orig,
                     srt_trans,
@@ -1301,6 +1458,12 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                     gs,
                     dn,
                     pp,
+                    voice_types_json,
+                    va_0, va_1, va_2, va_3,
+                    va_4, va_5, va_6, va_7,
+                    vt_0, vt_1, vt_2, vt_3,
+                    vt_4, vt_5, vt_6, vt_7,
+                    fallback_cloning,
                     progress=gr.Progress(),
                 ):
                     if not mp3:
@@ -1312,12 +1475,48 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                     if not lang:
                         raise gr.Error("Please select a target language.")
 
+                    voice_audios = [va_0, va_1, va_2, va_3, va_4, va_5, va_6, va_7]
+                    voice_texts = [vt_0, vt_1, vt_2, vt_3, vt_4, vt_5, vt_6, vt_7]
+
+                    # Determine if voice-map mode should be used
+                    use_voice_map = (
+                        single_speaker == "Voice-map (speaker analysis)"
+                        and voice_types_json is not None
+                        and isinstance(voice_types_json, dict)
+                    )
+
+                    voice_map = None
+                    segment_voice_map = None
+
+                    if use_voice_map:
+                        # Build voice_map from non-None audio/text pairs
+                        raw_seg_map = voice_types_json.get("segment_voice_map", {})
+                        voice_map_built: dict[str, tuple[str, str]] = {}
+                        for i, vt_label in enumerate(ALL_VOICE_TYPES):
+                            audio_path = voice_audios[i]
+                            transcript = voice_texts[i]
+                            # gr.Audio(type="filepath") returns a string path or None
+                            file_path = getattr(audio_path, "name", audio_path) if audio_path is not None else None
+                            if file_path and transcript:
+                                voice_map_built[vt_label] = (file_path, str(transcript))
+
+                        if voice_map_built:
+                            voice_map = voice_map_built
+                            segment_voice_map = {
+                                int(k): v for k, v in raw_seg_map.items()
+                            }
+
+                    # Compute single_speaker flag:
+                    # "Voice-map" uses voice_map (not single-speaker mode)
+                    # Otherwise check if "Single-speaker" is selected
+                    is_single_speaker = (single_speaker == "Single-speaker")
+
                     request = DubbingRequest(
                         mp3_path=mp3,
                         original_srt_path=srt_orig,
                         translated_srt_path=srt_trans,
                         language=lang,
-                        single_speaker=(single_speaker == "Single-speaker"),
+                        single_speaker=is_single_speaker,
                         skip_alignment_check=bool(skip_alignment),
                         use_demucs=bool(demucs_enabled),
                         demucs_model=str(demucs_model or "htdemucs_ft"),
@@ -1331,6 +1530,8 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                         guidance_scale=float(gs or 2.0),
                         denoise=bool(dn),
                         postprocess_output=bool(pp),
+                        voice_map=voice_map,
+                        segment_voice_map=segment_voice_map,
                     )
 
                     def _progress(fraction: float, message: str):
@@ -1356,6 +1557,11 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                     else:
                         status_parts.append("All segments generated successfully.")
 
+                    if voice_map:
+                        status_parts.append(
+                            f"Voice-map mode: {len(voice_map)} voice sample(s) used."
+                        )
+
                     import soundfile as sf
 
                     audio_data, sr = sf.read(result.wav_path, dtype="float32")
@@ -1367,8 +1573,21 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                         "\n".join(status_parts),
                     )
 
+                # ── Wire click handlers ────────────────────────────────────
+                dub_analyze_btn.click(
+                    _analyze_speakers_fn,
+                    inputs=[dub_mp3, dub_srt_original, dub_api_key],
+                    outputs=[
+                        dub_analysis_status,
+                        dub_voice_types_json,
+                        dub_voice_result_md,
+                        voice_samples_group,
+                        *dub_voice_rows,
+                    ],
+                )
+
                 dub_btn.click(
-                    _dub_fn,
+                    _generate_fn,
                     inputs=[
                         dub_mp3,
                         dub_srt_original,
@@ -1386,6 +1605,10 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                         dub_gs,
                         dub_dn,
                         dub_pp,
+                        dub_voice_types_json,
+                        *dub_voice_audios,
+                        *dub_voice_texts,
+                        dub_fallback_checkbox,
                     ],
                     outputs=[dub_audio, dub_download, dub_status],
                 )

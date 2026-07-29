@@ -91,6 +91,24 @@ class DubbingRequest:
     use_demucs: bool = False
     demucs_model: str = "htdemucs_ft"
     demucs_device: str | None = None
+    # ── Speaker analysis (optional) ────────────────────────────────
+    voice_map: dict[str, tuple[str, str]] | None = None
+    """Optional mapping from VoiceType label to ``(audio_path, transcript)``.
+    
+    When provided along with *segment_voice_map*, the pipeline uses
+    user-provided voice samples for cloning instead of per-segment
+    audio extraction. VoiceType labels follow the format
+    ``"{gender}-{age}"`` (e.g. ``"male-young"``).
+    
+    If empty or ``None``, the pipeline falls back to per-segment
+    audio cloning (existing behavior).
+    """
+    segment_voice_map: dict[int, str] | None = None
+    """Optional mapping from 1-based SRT index to VoiceType label.
+    
+    Produced by :func:`omnivoice.speaker.build_segment_voice_map` from
+    Gemini speaker analysis results. Required when *voice_map* is set.
+    """
 
 
 @dataclass(frozen=True)
@@ -513,6 +531,22 @@ def run_dubbing(
         )
         _report_progress(progress_callback, 0.20, "Shared voice cloned — reusing for all segments")
 
+    # ── 3.6 Voice-map mode: pre-clone user-provided voice samples ──
+    voice_clone_prompts: dict[str, Any] = {}
+    if request.voice_map and request.segment_voice_map:
+        _report_progress(progress_callback, 0.22, "Pre-cloning voice samples…")
+        for voice_type, (audio_path, transcript) in request.voice_map.items():
+            logger.info("Cloning voice sample for %s from %s", voice_type, audio_path)
+            voice_clone_prompts[voice_type] = model.create_voice_clone_prompt(
+                ref_audio=audio_path,
+                ref_text=transcript,
+            )
+        _report_progress(
+            progress_callback,
+            0.25,
+            f"Voice samples cloned: {len(voice_clone_prompts)} voice types ready",
+        )
+
     # ── 4. Process segments ───────────────────────────────────────
     dubbed_audio_chunks: list[np.ndarray] = []
     failed_indices: list[int] = []
@@ -570,6 +604,34 @@ def run_dubbing(
                 # Single-speaker mode: reuse pre-computed voice
                 gen_kwargs_seg = dict(gen_kwargs)
                 gen_kwargs_seg["voice_clone_prompt"] = shared_voice_clone_prompt
+            elif voice_clone_prompts and request.segment_voice_map:
+                # Voice-map mode: use pre-cloned user-provided voice samples
+                seg_index = orig_entry.index
+                voice_type = request.segment_voice_map.get(seg_index)
+                if voice_type and voice_type in voice_clone_prompts:
+                    gen_kwargs_seg = dict(gen_kwargs)
+                    gen_kwargs_seg["voice_clone_prompt"] = voice_clone_prompts[voice_type]
+                    logger.debug(
+                        "Segment %d (index %d): using voice-map %s",
+                        i, seg_index, voice_type,
+                    )
+                else:
+                    # Voice type not in map or no sample — fall back to per-segment
+                    logger.debug(
+                        "Segment %d (index %d): voice type %s not in voice_map, "
+                        "falling back to per-segment cloning",
+                        i, seg_index, voice_type,
+                    )
+                    source_segment = _extract_audio_segment(
+                        full_audio, orig_entry, request.padding_ms
+                    )
+                    source_data = _audiosegment_to_numpy_mono(source_segment)
+                    source_data = _trim_silence_numpy(source_data, source_segment.frame_rate)
+                    ref_path = work_dir / f"ref_{i:04d}.wav"
+                    sf.write(str(ref_path), source_data, source_segment.frame_rate)
+                    gen_kwargs_seg = dict(gen_kwargs)
+                    gen_kwargs_seg["ref_text"] = orig_entry.text
+                    gen_kwargs_seg["ref_audio"] = str(ref_path)
             else:
                 # Multi-speaker mode: extract audio + clone per segment
                 source_segment = _extract_audio_segment(
